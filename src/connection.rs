@@ -622,3 +622,204 @@ pub fn transaction<K: ToRedisArgs,
         }
     }
 }
+
+pub mod async {
+
+    use std::net::SocketAddr;
+    use std::cell::RefCell;
+    use std::mem;
+    use std::io::BufReader;
+
+    use tokio_io;
+    use tokio_core::reactor;
+    use tokio_core::net::TcpStream;
+
+    use futures::{future, Async, Future};
+    use futures::future::Either;
+
+    use cmd::cmd;
+    use types::{ErrorKind, RedisError, RedisResult, RedisFuture, Value};
+
+    use connection::{ConnectionAddr, ConnectionInfo};
+
+    /// Represents a stateful redis TCP connection.
+    pub struct Connection {
+        con: TcpStream,
+        db: i64,
+    }
+
+    impl Connection {
+        pub fn read_response(self) -> RedisFuture<(Self, Value)> {
+            let db = self.db;
+            Box::new(::parser::combine_parser::parse(BufReader::new(self.con)).then(move |result| {
+                match result {
+                    Ok((con, value)) => Ok((Connection { con: con.into_inner(), db }, value)),
+                    Err(err) => {
+                        // TODO Do we need to shutdown here as we do in the sync version?
+                        Err(err)
+                    }
+                }
+            }))
+        }
+    }
+
+
+    pub fn connect(connection_info: ConnectionInfo, handle: &reactor::Handle) -> RedisFuture<Connection> {
+        let connection = match *connection_info.addr {
+            ConnectionAddr::Tcp(ref host, ref port) => {
+                let host: &str = &*host;
+                // FIXME remove unwrap, make host IpAddr before this point?
+                TcpStream::connect(&SocketAddr::new(host.parse().unwrap(), *port), handle)
+            }
+            #[cfg(any(feature="with-unix-sockets", feature="with-system-unix-sockets"))]
+            ConnectionAddr::Unix(_) => {
+                return Box::new(future::err(RedisError::from((ErrorKind::InvalidClientConfig,
+                       "Cannot connect to unix sockets asynchronously"))));
+            }
+            #[cfg(not(any(feature="with-unix-sockets", feature="with-system-unix-sockets")))]
+            ConnectionAddr::Unix(_) => {
+                return Box::new(future::err(RedisError::from((ErrorKind::InvalidClientConfig,
+                       "Cannot connect to unix sockets \
+                       on this platform"))));
+            }
+        };
+
+        Box::new(connection.from_err().and_then(move |con| {
+            let rv = Connection {
+                con,
+                db: connection_info.db,
+            };
+
+            let login = match connection_info.passwd {
+                Some(ref passwd) => {
+                    Either::A(cmd("AUTH").arg(&**passwd).query_async::<_, Value>(rv)
+                        .then(|x| match x {
+                                Ok((rv, Value::Okay)) => Ok(rv),
+                                _ => {
+                                    fail!((
+                                        ErrorKind::AuthenticationFailed,
+                                        "Password authentication failed"
+                                    ));
+                                }
+                            })
+                        )
+                },
+                None => Either::B(future::ok(rv))
+            };
+
+            login.and_then(move |rv| {
+                if connection_info.db != 0 {
+                    Either::A(cmd("SELECT").arg(connection_info.db).query_async::<_, Value>(rv)
+                        .then(|result| match result {
+                                Ok((rv, Value::Okay)) => Ok(rv),
+                                _ => fail!((
+                                    ErrorKind::ResponseError,
+                                    "Redis server refused to switch database"
+                                )),
+                            })
+                        )
+                } else {
+                    Either::B(future::ok(rv))
+                }
+            })
+        }))
+    }
+
+    pub trait ConnectionLike: Sized {
+        /// Sends an already encoded (packed) command into the TCP socket and
+        /// reads the single response from it.
+        fn req_packed_command(self, cmd: Vec<u8>) -> RedisFuture<(Self, Value)>;
+
+        /// Sends multiple already encoded (packed) command into the TCP socket
+        /// and reads `count` responses from it.  This is used to implement
+        /// pipelining.
+        fn req_packed_commands(
+            self,
+            cmd: Vec<u8>,
+            offset: usize,
+            count: usize,
+        ) -> RedisFuture<(Self, Vec<Value>)>;
+
+        /// Returns the database this connection is bound to.  Note that this
+        /// information might be unreliable because it's initially cached and
+        /// also might be incorrect if the connection like object is not
+        /// actually connected.
+        fn get_db(&self) -> i64;
+    }
+
+    pub struct ConnectionLikeWrapper<T>(RefCell<Option<T>>);
+
+    impl<T> ::connection::ConnectionLike for ConnectionLikeWrapper<T> where T: ConnectionLike {
+        fn req_packed_command(&self, cmd: &[u8]) -> RedisResult<Value> {
+            let mut con = self.0.borrow_mut();
+            let (con_, value) = con.take().unwrap().req_packed_command(cmd.into()).wait()?;
+            *con = Some(con_);
+            Ok(value)
+        }
+
+        /// Sends multiple already encoded (packed) command into the TCP socket
+        /// and reads `count` responses from it.  This is used to implement
+        /// pipelining.
+        fn req_packed_commands(
+            &self,
+            cmd: &[u8],
+            offset: usize,
+            count: usize,
+        ) -> RedisResult<Vec<Value>> {
+            let mut con = self.0.borrow_mut();
+            let (con_, value) = con.take().unwrap().req_packed_commands(cmd.into(), offset, count).wait()?;
+            *con = Some(con_);
+            Ok(value)
+        }
+
+        fn get_db(&self) -> i64 {
+            self.0.borrow().as_ref().unwrap().get_db()
+        }
+    }
+
+    impl ConnectionLike for Connection {
+        fn req_packed_command(self, cmd: Vec<u8>) -> RedisFuture<(Self, Value)> {
+            let db = self.db;
+            Box::new(tokio_io::io::write_all(self.con, cmd).from_err().and_then(move |(con, _)| {
+                Connection { con, db }.read_response()
+            }))
+        }
+
+        fn req_packed_commands(
+            self,
+            cmd: Vec<u8>,
+            offset: usize,
+            count: usize,
+        ) -> RedisFuture<(Self, Vec<Value>)> {
+            let db = self.db;
+            Box::new(tokio_io::io::write_all(self.con, cmd).from_err().and_then(move |(con, _)| {
+                let mut con = Some(Connection { con, db });
+                let mut rv = vec![];
+                let mut future = None;
+                let mut idx = 0;
+                future::poll_fn(move || {
+                    assert!(con.is_some());
+
+                    while idx < offset + count {
+                        if future.is_none() {
+                            future = Some(con.take().unwrap().read_response());
+                        }
+                        let (con2, item) = try_ready!(future.as_mut().unwrap().poll());
+                        con = Some(con2);
+                        future = None;
+
+                        if idx >= offset {
+                            rv.push(item);
+                        }
+                        idx += 1;
+                    }
+                    Ok(Async::Ready((con.take().unwrap(), mem::replace(&mut rv, Vec::new()))))
+                })
+            }))
+        }
+
+        fn get_db(&self) -> i64 {
+            self.db
+        }
+    }
+}

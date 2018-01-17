@@ -1,5 +1,7 @@
-use types::{ToRedisArgs, FromRedisValue, Value, RedisResult, ErrorKind, from_redis_value};
+use types::{ToRedisArgs, FromRedisValue, Value, RedisFuture, RedisResult, ErrorKind, from_redis_value};
 use connection::ConnectionLike;
+
+use futures::Future;
 
 #[derive(Clone)]
 enum Arg<'a> {
@@ -258,6 +260,17 @@ impl Cmd {
             Ok(val) => from_redis_value(&val),
             Err(e) => Err(e),
         }
+    }
+
+    #[inline]
+    pub fn query_async<C, T: FromRedisValue>(&self, con: C) -> RedisFuture<(C, T)>
+        where C: ::connection::async::ConnectionLike + 'static,
+              T: 'static
+    {
+        let pcmd = self.get_packed_command();
+        Box::new(con.req_packed_command(pcmd).and_then(|(con, val)| {
+            from_redis_value(&val).map(|t| (con, t))
+        }))
     }
 
     /// Similar to `query()` but returns an iterator over the items of the

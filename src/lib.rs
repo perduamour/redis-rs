@@ -312,49 +312,39 @@
 
 #[macro_use]
 extern crate combine;
-extern crate url;
 extern crate sha1;
+extern crate url;
 
-#[cfg(feature="with-rustc-json")]
-pub extern crate rustc_serialize as serialize;
-#[cfg(feature="with-unix-sockets")]
+#[macro_use]
+extern crate futures;
+extern crate tokio_core;
+#[macro_use]
+extern crate tokio_io;
+
+#[cfg(feature = "with-unix-sockets")]
 extern crate unix_socket;
+#[cfg(feature = "with-rustc-json")]
+pub extern crate rustc_serialize as serialize;
 
 #[doc(hidden)]
-#[cfg(feature="with-rustc-json")]
+#[cfg(feature = "with-rustc-json")]
 pub use serialize::json::Json;
 
 // public api
 pub use parser::{parse_redis_value, Parser};
 pub use client::Client;
 pub use script::{Script, ScriptInvocation};
-pub use connection::{Connection, ConnectionLike, ConnectionInfo, ConnectionAddr,
-                     IntoConnectionInfo, PubSub, Msg, transaction, parse_redis_url};
-pub use cmd::{cmd, Cmd, pipe, Pipeline, Iter, pack_command};
+pub use connection::{parse_redis_url, transaction, Connection, ConnectionAddr, ConnectionInfo,
+                     ConnectionLike, IntoConnectionInfo, Msg, PubSub};
+pub use cmd::{cmd, pack_command, pipe, Cmd, Iter, Pipeline};
 pub use commands::{Commands, PipelineCommands};
 
-pub use types::{
-    /* low level values */
-    Value,
+pub use types::{/* utility functions */ from_redis_value, /* error kinds */ ErrorKind,
+                /* conversion traits */ FromRedisValue, /* utility types */ InfoDict,
+                NumericBehavior, /* error and result types */ RedisError, RedisResult,
+                ToRedisArgs, /* low level values */ Value, RedisFuture};
 
-    /* error and result types */
-    RedisError,
-    RedisResult,
-
-    /* error kinds */
-    ErrorKind,
-
-    /* utility types */
-    InfoDict,
-    NumericBehavior,
-
-    /* conversion traits */
-    FromRedisValue,
-    ToRedisArgs,
-
-    /* utility functions */
-    from_redis_value,
-};
+pub use connection::async;
 
 mod macros;
 

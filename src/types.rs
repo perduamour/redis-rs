@@ -2,12 +2,14 @@ use std::error;
 use std::fmt;
 use std::io;
 use std::hash::Hash;
-use std::str::{from_utf8, Utf8Error};
+use std::str::{Utf8Error, from_utf8};
 use std::collections::{HashMap, HashSet};
-use std::collections::{BTreeSet,BTreeMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::From;
 
-#[cfg(feature="with-rustc-json")]
+use futures::Future;
+
+#[cfg(feature = "with-rustc-json")]
 use serialize::json;
 
 
@@ -114,12 +116,10 @@ impl fmt::Debug for Value {
         match *self {
             Value::Nil => write!(fmt, "nil"),
             Value::Int(val) => write!(fmt, "int({:?})", val),
-            Value::Data(ref val) => {
-                match from_utf8(val) {
-                    Ok(x) => write!(fmt, "string-data('{:?}')", x),
-                    Err(_) => write!(fmt, "binary-data({:?})", val),
-                }
-            }
+            Value::Data(ref val) => match from_utf8(val) {
+                Ok(x) => write!(fmt, "string-data('{:?}')", x),
+                Err(_) => write!(fmt, "binary-data({:?})", val),
+            },
             Value::Bulk(ref values) => {
                 try!(write!(fmt, "bulk("));
                 let mut is_first = true;
@@ -160,8 +160,10 @@ impl PartialEq for RedisError {
             (&ErrorRepr::WithDescription(kind_a, _), &ErrorRepr::WithDescription(kind_b, _)) => {
                 kind_a == kind_b
             }
-            (&ErrorRepr::WithDescriptionAndDetail(kind_a, _, _),
-             &ErrorRepr::WithDescriptionAndDetail(kind_b, _, _)) => kind_a == kind_b,
+            (
+                &ErrorRepr::WithDescriptionAndDetail(kind_a, _, _),
+                &ErrorRepr::WithDescriptionAndDetail(kind_b, _, _),
+            ) => kind_a == kind_b,
             (&ErrorRepr::ExtensionError(ref a, _), &ErrorRepr::ExtensionError(ref b, _)) => {
                 *a == *b
             }
@@ -172,25 +174,33 @@ impl PartialEq for RedisError {
 
 impl From<io::Error> for RedisError {
     fn from(err: io::Error) -> RedisError {
-        RedisError { repr: ErrorRepr::IoError(err) }
+        RedisError {
+            repr: ErrorRepr::IoError(err),
+        }
     }
 }
 
 impl From<Utf8Error> for RedisError {
     fn from(_: Utf8Error) -> RedisError {
-        RedisError { repr: ErrorRepr::WithDescription(ErrorKind::TypeError, "Invalid UTF-8") }
+        RedisError {
+            repr: ErrorRepr::WithDescription(ErrorKind::TypeError, "Invalid UTF-8"),
+        }
     }
 }
 
 impl From<(ErrorKind, &'static str)> for RedisError {
     fn from((kind, desc): (ErrorKind, &'static str)) -> RedisError {
-        RedisError { repr: ErrorRepr::WithDescription(kind, desc) }
+        RedisError {
+            repr: ErrorRepr::WithDescription(kind, desc),
+        }
     }
 }
 
 impl From<(ErrorKind, &'static str, String)> for RedisError {
     fn from((kind, desc, detail): (ErrorKind, &'static str, String)) -> RedisError {
-        RedisError { repr: ErrorRepr::WithDescriptionAndDetail(kind, desc, detail) }
+        RedisError {
+            repr: ErrorRepr::WithDescriptionAndDetail(kind, desc, detail),
+        }
     }
 }
 
@@ -284,10 +294,10 @@ impl RedisError {
                     // if we connect to a unix socket and the file does not
                     // exist yet, then we want to treat this as if it was a
                     // connection refusal.
-                    io::ErrorKind::NotFound => {
-                        cfg!(any(feature = "with-unix-sockets",
-                                 feature = "with-system-unix-sockets"))
-                    }
+                    io::ErrorKind::NotFound => cfg!(any(
+                        feature = "with-unix-sockets",
+                        feature = "with-system-unix-sockets"
+                    )),
                     _ => false,
                 }
             }
@@ -299,13 +309,11 @@ impl RedisError {
     /// Note that this may not be accurate depending on platform.
     pub fn is_timeout(&self) -> bool {
         match self.repr {
-            ErrorRepr::IoError(ref err) => {
-                match err.kind() {
-                    io::ErrorKind::TimedOut => true,
-                    io::ErrorKind::WouldBlock => true,
-                    _ => false,
-                }
-            }
+            ErrorRepr::IoError(ref err) => match err.kind() {
+                io::ErrorKind::TimedOut => true,
+                io::ErrorKind::WouldBlock => true,
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -321,13 +329,13 @@ impl RedisError {
 
 pub fn make_extension_error(code: &str, detail: Option<&str>) -> RedisError {
     RedisError {
-        repr: ErrorRepr::ExtensionError(code.to_string(),
-                                        match detail {
-                                            Some(x) => x.to_string(),
-                                            None => {
-                                                "Unknown extension error encountered".to_string()
-                                            }
-                                        }),
+        repr: ErrorRepr::ExtensionError(
+            code.to_string(),
+            match detail {
+                Some(x) => x.to_string(),
+                None => "Unknown extension error encountered".to_string(),
+            },
+        ),
     }
 }
 
@@ -335,6 +343,7 @@ pub fn make_extension_error(code: &str, detail: Option<&str>) -> RedisError {
 /// Library generic result type.
 pub type RedisResult<T> = Result<T, RedisError>;
 
+pub type RedisFuture<T> = Box<Future<Item = T, Error = RedisError>>;
 
 /// An info dictionary type.
 #[derive(Debug)]
@@ -630,7 +639,7 @@ impl<T: ToRedisArgs + Hash + Eq + Ord,
     }
 }
 
-#[cfg(feature="with-rustc-json")]
+#[cfg(feature = "with-rustc-json")]
 impl ToRedisArgs for json::Json {
     fn write_redis_args(&self, out: &mut Vec<Vec<u8>>) {
         // XXX: the encode result needs to be handled properly
@@ -798,15 +807,13 @@ impl FromRedisValue for bool {
         match *v {
             Value::Nil => Ok(false),
             Value::Int(val) => Ok(val != 0),
-            Value::Status(ref s) => {
-                if &s[..] == "1" {
-                    Ok(true)
-                } else if &s[..] == "0" {
-                    Ok(false)
-                } else {
-                    invalid_type_error!(v, "Response status not valid boolean");
-                }
-            }
+            Value::Status(ref s) => if &s[..] == "1" {
+                Ok(true)
+            } else if &s[..] == "0" {
+                Ok(false)
+            } else {
+                invalid_type_error!(v, "Response status not valid boolean");
+            },
             Value::Okay => Ok(true),
             _ => invalid_type_error!(v, "Response type not bool compatible."),
         }
@@ -829,12 +836,10 @@ impl<T: FromRedisValue> FromRedisValue for Vec<T> {
         match *v {
             // this hack allows us to specialize Vec<u8> to work with
             // binary data whereas all others will fail with an error.
-            Value::Data(ref bytes) => {
-                match FromRedisValue::from_byte_vec(bytes) {
-                    Some(x) => Ok(x),
-                    None => invalid_type_error!(v, "Response type not vector compatible."),
-                }
-            }
+            Value::Data(ref bytes) => match FromRedisValue::from_byte_vec(bytes) {
+                Some(x) => Ok(x),
+                None => invalid_type_error!(v, "Response type not vector compatible."),
+            },
             Value::Bulk(ref items) => FromRedisValue::from_redis_values(items),
             Value::Nil => Ok(vec![]),
             _ => invalid_type_error!(v, "Response type not vector compatible."),
@@ -861,7 +866,8 @@ impl<K: FromRedisValue + Eq + Hash, V: FromRedisValue> FromRedisValue for HashMa
 }
 
 impl<K: FromRedisValue + Eq + Hash, V: FromRedisValue> FromRedisValue for BTreeMap<K, V>
-    where K: Ord
+where
+    K: Ord,
 {
     fn from_redis_value(v: &Value) -> RedisResult<BTreeMap<K, V>> {
         match *v {
@@ -896,7 +902,8 @@ impl<T: FromRedisValue + Eq + Hash> FromRedisValue for HashSet<T> {
 }
 
 impl<T: FromRedisValue + Eq + Hash> FromRedisValue for BTreeSet<T>
-    where T: Ord
+where
+    T: Ord,
 {
     fn from_redis_value(v: &Value) -> RedisResult<BTreeSet<T>> {
         match *v {
@@ -997,7 +1004,7 @@ impl FromRedisValue for InfoDict {
     }
 }
 
-#[cfg(feature="with-rustc-json")]
+#[cfg(feature = "with-rustc-json")]
 impl FromRedisValue for json::Json {
     fn from_redis_value(v: &Value) -> RedisResult<json::Json> {
         let rv = match *v {

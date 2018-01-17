@@ -1,7 +1,6 @@
-use std::io::{BufReader, Read};
+use std::io::{BufRead, BufReader};
 
-use types::{make_extension_error, ErrorKind, RedisResult, Value};
-
+use types::{RedisResult, Value};
 
 pub mod combine_parser {
     use std::any::Any;
@@ -10,7 +9,7 @@ pub mod combine_parser {
 
     use types::{make_extension_error, ErrorKind, RedisError, RedisResult, Value};
 
-    use combine::{self, Parser, Stream};
+    use combine::{self, choice, Stream};
     use combine::primitives::RangeStream;
     #[allow(unused_imports)] // See https://github.com/rust-lang/rust/issues/43970
     use combine::primitives::StreamError;
@@ -18,18 +17,61 @@ pub mod combine_parser {
     use combine::range::{take, take_while};
     use combine::combinator::no_partial;
 
-    use futures::{Future, Poll, Async};
+    use futures::{Async, Future, Poll};
     use tokio_io::AsyncRead;
+
+    struct ResultExtend(Result<Vec<Value>, RedisError>);
+
+    impl Default for ResultExtend {
+        fn default() -> Self {
+            ResultExtend(Ok(Vec::new()))
+        }
+    }
+
+    // TODO Remove
+    impl ::std::iter::FromIterator<RedisResult<Value>> for ResultExtend {
+        fn from_iter<I>(iter: I) -> Self
+        where
+            I: IntoIterator<Item = RedisResult<Value>>,
+        {
+            let mut result = Self::default();
+            result.extend(iter);
+            result
+        }
+    }
+
+    impl Extend<RedisResult<Value>> for ResultExtend {
+        fn extend<I>(&mut self, iter: I)
+        where
+            I: IntoIterator<Item = RedisResult<Value>>,
+        {
+            let mut returned_err = None;
+            match self.0 {
+                Ok(ref mut elems) => for item in iter {
+                    match item {
+                        Ok(item) => elems.push(item),
+                        Err(err) => {
+                            returned_err = Some(err);
+                            break;
+                        }
+                    }
+                },
+                Err(_) => (),
+            }
+            if let Some(err) = returned_err {
+                self.0 = Err(err);
+            }
+        }
+    }
 
     parser!{
         type PartialState = Option<Box<Any>>;
-        fn value['a, I]()(I) -> Value
+        fn value['a, I]()(I) -> RedisResult<Value>
             where [I: Stream<Item = u8, Range = &'a [u8], Error = combine::easy::StreamErrors<I>> + RangeStream,
                    // FIXME This shouldn't be necessary but rustc is currently unable to figure out
                    // this type
                    I::Error: combine::primitives::ParseError<I::Item, I::Range, I::Position, StreamError = combine::easy::Error<I::Item, I::Range>> ]
         {
-
             let end_of_line = || crlf().or(newline());
             // TODO Allow partial parsing for this part
             let line = || no_partial(take_while(|c| c != b'\r' && c != b'\n').skip(end_of_line()))
@@ -42,26 +84,41 @@ pub mod combine_parser {
                     Value::Status(line.into())
                 }
             });
+
             let int = || line().and_then(|line| {
                 match line.trim().parse::<i64>() {
                     Err(_) => Err(combine::easy::Error::message_static_message("Expected integer, got garbage")),
                     Ok(value) => Ok(value),
                 }
             });
-            let data = || int().then_partial(|size| take(*size as usize).map(|bs: &[u8]| bs.to_vec()).skip(end_of_line()));
+
+            let data = || int().then_partial(|size| {
+                if *size < 0 {
+                    combine::value(Value::Nil).left()
+                } else {
+                    take(*size as usize)
+                        .map(|bs: &[u8]| Value::Data(bs.to_vec()))
+                        .skip(end_of_line())
+                        .right()
+                }
+            });
+
             let bulk = || {
                 int().then_partial(|&mut length| {
                     if length < 0 {
-                        combine::value(Value::Nil).left()
+                        combine::value(Value::Nil).map(Ok).left()
                     } else {
                         let length = length as usize;
-                        combine::count_min_max(length, length, value()).map(Value::Bulk).right()
+                        combine::count_min_max(length, length, value()).map(|result: ResultExtend| {
+                            result.0.map(Value::Bulk)
+                        }).right()
                     }
                 })
             };
+
             let error = || {
                 line()
-                    .and_then(|line: &str| {
+                    .map(|line: &str| {
                         let desc = "An error was signalled by the server";
                         let mut pieces = line.splitn(2, ' ');
                         let kind = match pieces.next().unwrap() {
@@ -70,69 +127,101 @@ pub mod combine_parser {
                             "LOADING" => ErrorKind::BusyLoadingError,
                             "NOSCRIPT" => ErrorKind::NoScriptError,
                             code => {
-                                return Err(combine::easy::Error::other(make_extension_error(code, pieces.next())))
+                                return make_extension_error(code, pieces.next())
                             }
                         };
-                        Err(combine::easy::Error::other(match pieces.next() {
+                        match pieces.next() {
                             Some(detail) => RedisError::from((kind, desc, detail.to_string())),
                             None => RedisError::from(((kind, desc))),
-                        }))
+                        }
                     })
             };
-            choice!(
-               byte(b'+').with(status()),
-               byte(b':').with(int().map(Value::Int)),
-               byte(b'$').with(data().map(Value::Data)),
+
+            choice((
+               byte(b'+').with(status().map(Ok)),
+               byte(b':').with(int().map(Value::Int).map(Ok)),
+               byte(b'$').with(data().map(Ok)),
                byte(b'*').with(bulk()),
-               byte(b'-').with(error())
-            )
+               byte(b'-').with(error().map(Err))
+            ))
         }
     }
 
     pub struct ValueFuture<R> {
         reader: Option<R>,
-        buffer: Vec<u8>,
         state: Option<Box<Any>>,
+        last_buf_len: Option<usize>,
     }
 
     impl<R> Future for ValueFuture<R>
-        where R: AsyncRead
+    where
+        R: BufRead,
     {
         type Item = (R, Value);
         type Error = RedisError;
 
         fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-            assert!(self.reader.is_some(), "ValueFuture: poll called on completed future");
-            // FIXME reserve data before reading?
-            try_ready!(self.reader.as_mut().unwrap().read_buf(&mut self.buffer));
+            assert!(
+                self.reader.is_some(),
+                "ValueFuture: poll called on completed future"
+            );
             let (opt, removed) = {
-                let stream = combine::easy::Stream(combine::primitives::PartialStream(&self.buffer[..]));
+                let buffer = try_nb!(self.reader.as_mut().unwrap().fill_buf());
+                self.last_buf_len = Some(buffer.len());
+                let stream = combine::easy::Stream(combine::primitives::PartialStream(buffer));
                 match combine::async::decode(value(), stream, &mut self.state) {
                     Ok(x) => x,
                     Err(err) => {
-                        let err = err.map_position(|pos| pos.translate_position(&self.buffer[..]))
+                        let err = err.map_position(|pos| pos.translate_position(buffer))
                             .map_range(|range| format!("{:?}", range))
                             .to_string();
-                        return Err(RedisError::from((ErrorKind::ResponseError, "parse error", err)))
+                        return Err(RedisError::from(
+                            (ErrorKind::ResponseError, "parse error", err),
+                        ));
                     }
                 }
             };
 
+            self.reader.as_mut().unwrap().consume(removed);
             match opt {
-                Some(value) => return Ok(Async::Ready((self.reader.take().unwrap(), value))),
-                None => {
-                    self.buffer.drain(..removed);
-                    Ok(Async::NotReady)
+                Some(value) => {
+                    let reader = self.reader.take().unwrap();
+                    return Ok(Async::Ready((reader, value?)));
                 }
+                None => Ok(Async::NotReady),
             }
         }
     }
 
-    pub fn parse<R>(reader: R) -> ValueFuture<R> where R: AsyncRead {
+    pub fn parse<R>(reader: R) -> ValueFuture<R>
+    where
+        R: AsyncRead + BufRead,
+    {
         ValueFuture {
             reader: Some(reader),
-            buffer: Vec::new(),
             state: None,
+            last_buf_len: None,
+        }
+    }
+
+    pub fn parse_sync<R>(reader: R) -> RedisResult<Value>
+    where
+        R: BufRead,
+    {
+        let mut parser = ValueFuture {
+            reader: Some(reader),
+            state: None,
+            last_buf_len: None,
+        };
+        loop {
+            match parser.poll()? {
+                Async::NotReady => {
+                    if parser.last_buf_len == Some(0) {
+                        fail!((ErrorKind::ResponseError, "Could not read enough bytes"))
+                    }
+                }
+                Async::Ready((_, value)) => return Ok(value),
+            }
         }
     }
 }
@@ -146,7 +235,7 @@ pub struct Parser<T> {
 /// you normally do not use this directly as it's already done for you by
 /// the client but in some more complex situations it might be useful to be
 /// able to parse the redis responses.
-impl<'a, T: Read> Parser<T> {
+impl<'a, T: BufRead> Parser<T> {
     /// Creates a new parser that parses the data behind the reader.  More
     /// than one value can be behind the reader in which case the parser can
     /// be invoked multiple times.  In other words: the stream does not have
@@ -158,161 +247,7 @@ impl<'a, T: Read> Parser<T> {
     // public api
 
     pub fn parse_value(&mut self) -> RedisResult<Value> {
-        let b = try!(self.read_byte());
-        match b as char {
-            '+' => self.parse_status(),
-            ':' => self.parse_int(),
-            '$' => self.parse_data(),
-            '*' => self.parse_bulk(),
-            '-' => self.parse_error(),
-            _ => fail!((
-                ErrorKind::ResponseError,
-                "Invalid response when parsing value"
-            )),
-        }
-    }
-
-    // internal helpers
-
-    #[inline]
-    fn expect_char(&mut self, refchar: char) -> RedisResult<()> {
-        if try!(self.read_byte()) as char == refchar {
-            Ok(())
-        } else {
-            fail!((ErrorKind::ResponseError, "Invalid byte in response"));
-        }
-    }
-
-    #[inline]
-    fn expect_newline(&mut self) -> RedisResult<()> {
-        match try!(self.read_byte()) as char {
-            '\n' => Ok(()),
-            '\r' => self.expect_char('\n'),
-            _ => fail!((ErrorKind::ResponseError, "Invalid byte in response")),
-        }
-    }
-
-    fn read_line(&mut self) -> RedisResult<Vec<u8>> {
-        let mut rv = vec![];
-
-        loop {
-            let b = try!(self.read_byte());
-            match b as char {
-                '\n' => {
-                    break;
-                }
-                '\r' => {
-                    try!(self.expect_char('\n'));
-                    break;
-                }
-                _ => rv.push(b),
-            };
-        }
-
-        Ok(rv)
-    }
-
-    fn read_string_line(&mut self) -> RedisResult<String> {
-        match String::from_utf8(try!(self.read_line())) {
-            Err(_) => fail!((
-                ErrorKind::ResponseError,
-                "Expected valid string, got garbage"
-            )),
-            Ok(value) => Ok(value),
-        }
-    }
-
-    fn read_byte(&mut self) -> RedisResult<u8> {
-        let buf: &mut [u8; 1] = &mut [0];
-        let nread = try!(self.reader.read(buf));
-
-        if nread < 1 {
-            fail!((ErrorKind::ResponseError, "Could not read enough bytes"))
-        } else {
-            Ok(buf[0])
-        }
-    }
-
-    fn read(&mut self, bytes: usize) -> RedisResult<Vec<u8>> {
-        let mut rv = vec![0; bytes];
-        let mut i = 0;
-        while i < bytes {
-            let res_nread = {
-                let ref mut buf = &mut rv[i..];
-                self.reader.read(buf)
-            };
-            match res_nread {
-                Ok(nread) if nread > 0 => i += nread,
-                Ok(_) => fail!((ErrorKind::ResponseError, "Could not read enough bytes")),
-                Err(e) => return Err(From::from(e)),
-            }
-        }
-        Ok(rv)
-    }
-
-    fn read_int_line(&mut self) -> RedisResult<i64> {
-        let line = try!(self.read_string_line());
-        match line.trim().parse::<i64>() {
-            Err(_) => fail!((ErrorKind::ResponseError, "Expected integer, got garbage")),
-            Ok(value) => Ok(value),
-        }
-    }
-
-    fn parse_status(&mut self) -> RedisResult<Value> {
-        let line = try!(self.read_string_line());
-        if line == "OK" {
-            Ok(Value::Okay)
-        } else {
-            Ok(Value::Status(line))
-        }
-    }
-
-    fn parse_int(&mut self) -> RedisResult<Value> {
-        Ok(Value::Int(try!(self.read_int_line())))
-    }
-
-    fn parse_data(&mut self) -> RedisResult<Value> {
-        let length = try!(self.read_int_line());
-        if length < 0 {
-            Ok(Value::Nil)
-        } else {
-            let data = try!(self.read(length as usize));
-            try!(self.expect_newline());
-            Ok(Value::Data(data))
-        }
-    }
-
-    fn parse_bulk(&mut self) -> RedisResult<Value> {
-        let length = try!(self.read_int_line());
-        if length < 0 {
-            Ok(Value::Nil)
-        } else {
-            let mut rv = vec![];
-            rv.reserve(length as usize);
-            for _ in 0..length {
-                rv.push(try!(self.parse_value()));
-            }
-            Ok(Value::Bulk(rv))
-        }
-    }
-
-    fn parse_error(&mut self) -> RedisResult<Value> {
-        let desc = "An error was signalled by the server";
-        let line = try!(self.read_string_line());
-        let mut pieces = line.splitn(2, ' ');
-        let kind = match pieces.next().unwrap() {
-            "ERR" => ErrorKind::ResponseError,
-            "EXECABORT" => ErrorKind::ExecAbortError,
-            "LOADING" => ErrorKind::BusyLoadingError,
-            "NOSCRIPT" => ErrorKind::NoScriptError,
-            code => {
-                fail!(make_extension_error(code, pieces.next()));
-            }
-        };
-        match pieces.next() {
-            Some(detail) => fail!((kind, desc, detail.to_string())),
-            None => fail!((kind, desc)),
-        }
+        combine_parser::parse_sync(&mut self.reader)
     }
 }
 

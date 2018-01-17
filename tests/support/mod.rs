@@ -1,8 +1,10 @@
 #![allow(dead_code)]
 
 extern crate rand; extern crate net2;
+extern crate tokio_core;
+use self::tokio_core::reactor;
 
-use redis;
+use redis::{self, RedisFuture};
 
 use std::fs;
 use std::env;
@@ -144,6 +146,10 @@ impl TestContext {
 
     pub fn connection(&self) -> redis::Connection {
         self.client.get_connection().unwrap()
+    }
+
+    pub fn async_connection(&self, handle: &reactor::Handle) -> RedisFuture<redis::async::Connection> {
+        self.client.get_async_connection(handle)
     }
 
     pub fn pubsub(&self) -> redis::PubSub {

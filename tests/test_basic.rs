@@ -7,6 +7,7 @@ use std::thread::{spawn, sleep};
 use std::time::Duration;
 use std::collections::{HashMap, HashSet};
 use std::collections::{BTreeSet,BTreeMap};
+use std::io::BufReader;
 
 use support::*;
 
@@ -531,10 +532,10 @@ fn test_invalid_protocol() {
     let port = listener.local_addr().unwrap().port();
 
     let child = thread::spawn(move || -> Result<(), Box<Error + Send + Sync>> {
-        let mut stream = try!(listener.incoming().next().unwrap());
+        let mut stream = BufReader::new(try!(listener.incoming().next().unwrap()));
         // read the request and respond with garbage
         let _: redis::Value = try!(Parser::new(&mut stream).parse_value());
-        try!(stream.write_all(b"garbage ---!#!#\r\n\r\n\n\r"));
+        try!(stream.get_mut().write_all(b"garbage ---!#!#\r\n\r\n\n\r"));
         // block until the stream is shutdown by the client
         let _: RedisResult<redis::Value> = Parser::new(&mut stream).parse_value();
         Ok(())
