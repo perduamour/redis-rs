@@ -11,17 +11,22 @@ mod combine_parser {
 
     use combine::{self, Parser, Stream};
     use combine::primitives::RangeStream;
+    #[allow(unused_imports)] // See https://github.com/rust-lang/rust/issues/43970
+    use combine::primitives::StreamError;
     use combine::byte::{byte, crlf, newline};
     use combine::range::{take, take_while};
 
     parser!{
         fn value['a, I]()(I) -> Value
-            where [I: Stream<Item = u8, Range = &'a [u8]> + RangeStream]
+            where [I: Stream<Item = u8, Range = &'a [u8], Error = combine::easy::StreamErrors<I>> + RangeStream,
+                   // FIXME This shouldn't be necessary but rustc is currently unable to figure out
+                   // this type
+                   I::Error: combine::primitives::ParseError<I::Item, I::Range, I::Position, StreamError = combine::easy::Error<I::Item, I::Range>> ]
         {
             let end_of_line = || crlf().or(newline());
             let line = || take_while(|c| c != b'\r' && c != b'\n')
                 .skip(end_of_line())
-                .and_then(|line: &[u8]| str::from_utf8(line));
+                .and_then(|line: &[u8]| str::from_utf8(line).map_err(combine::easy::Error::other));
 
             let status = || line().map(|line| {
                 if line == "OK" {
@@ -32,7 +37,7 @@ mod combine_parser {
             });
             let int = || line().and_then(|line| {
                 match line.trim().parse::<i64>() {
-                    Err(_) => Err(combine::primitives::Error::Message("Expected integer, got garbage".into())),
+                    Err(_) => Err(combine::easy::Error::message_static_message("Expected integer, got garbage")),
                     Ok(value) => Ok(value),
                 }
             });
@@ -49,7 +54,7 @@ mod combine_parser {
             };
             let error = || {
                 line()
-                    .and_then(|line: &str| -> RedisResult<_> {
+                    .and_then(|line: &str| {
                         let desc = "An error was signalled by the server";
                         let mut pieces = line.splitn(2, ' ');
                         let kind = match pieces.next().unwrap() {
@@ -58,13 +63,13 @@ mod combine_parser {
                             "LOADING" => ErrorKind::BusyLoadingError,
                             "NOSCRIPT" => ErrorKind::NoScriptError,
                             code => {
-                                fail!(make_extension_error(code, pieces.next()))
+                                return Err(combine::easy::Error::other(make_extension_error(code, pieces.next())))
                             }
                         };
-                        match pieces.next() {
-                            Some(detail) => fail!((kind, desc, detail.to_string())),
-                            None => fail!(((kind, desc))),
-                        }
+                        Err(combine::easy::Error::other(match pieces.next() {
+                            Some(detail) => RedisError::from((kind, desc, detail.to_string())),
+                            None => RedisError::from(((kind, desc))),
+                        }))
                     })
             };
             choice!(
@@ -80,7 +85,7 @@ mod combine_parser {
     pub fn parse<R>(mut reader: R) -> RedisResult<Value> where R: BufRead {
         let mut buffer = Vec::new();
         reader.read_until(b'\n', &mut buffer)?;
-        value().parse(&buffer[..])
+        value().easy_parse(&buffer[..])
             .map(|(value, _)| value)
             .map_err(|err| {
                 RedisError::from((ErrorKind::ResponseError, "parse error", format!("{:?}", err))) //err.map_range(|range| format!("{:?}", range)).to_string()))
