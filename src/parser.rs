@@ -5,8 +5,9 @@ use types::{make_extension_error, ErrorKind, RedisResult, Value};
 
 mod combine_parser {
     use std::str;
+    use std::io::Read;
 
-    use types::{make_extension_error, ErrorKind, RedisResult, Value};
+    use types::{make_extension_error, ErrorKind, RedisError, RedisResult, Value};
 
     use combine::{self, Parser, Stream};
     use combine::primitives::RangeStream;
@@ -76,6 +77,16 @@ mod combine_parser {
             )
         }
     }
+
+    pub fn parse<R>(reader: R) -> RedisResult<Value> where R: Read {
+        // let stream = combine::primitives::ReadStream::new(reader);
+        let stream = &b""[..];
+        value().parse(stream)
+            .map(|(value, _)| value)
+            .map_err(|err| {
+                RedisError::from((ErrorKind::ResponseError, "parse error", format!("{:?}", err))) //err.map_range(|range| format!("{:?}", range)).to_string()))
+            })
+    }
 }
 
 /// The internal redis response parser.
@@ -98,10 +109,13 @@ impl<'a, T: Read> Parser<T> {
 
     // public api
 
+    pub fn parse_value(&mut self) -> RedisResult<Value> {
+        combine_parser::parse(&mut self.reader)
+    }
     /// parses a single value out of the stream.  If there are multiple
     /// values you can call this multiple times.  If the reader is not yet
     /// ready this will block.
-    pub fn parse_value(&mut self) -> RedisResult<Value> {
+    pub fn parse_value2(&mut self) -> RedisResult<Value> {
         let b = try!(self.read_byte());
         match b as char {
             '+' => self.parse_status(),
