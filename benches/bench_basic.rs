@@ -107,6 +107,7 @@ benchmark_group!(
     bench_simple_getsetdel_pipeline_precreated,
     bench_long_pipeline,
     bench_encode_pipeline,
-    bench_encode_pipeline_nested
+    bench_encode_pipeline_nested,
+    bench_long_pipeline
 );
 benchmark_main!(bench);
