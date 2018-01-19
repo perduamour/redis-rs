@@ -1,11 +1,11 @@
-use std::io::{BufReader, Read};
+use std::io::{BufReader, BufRead};
 
 use types::{make_extension_error, ErrorKind, RedisResult, Value};
 
 
 mod combine_parser {
     use std::str;
-    use std::io::Read;
+    use std::io::BufRead;
 
     use types::{make_extension_error, ErrorKind, RedisError, RedisResult, Value};
 
@@ -77,10 +77,10 @@ mod combine_parser {
         }
     }
 
-    pub fn parse<R>(reader: R) -> RedisResult<Value> where R: Read {
-        // let stream = combine::primitives::ReadStream::new(reader);
-        let stream = &b""[..];
-        value().parse(stream)
+    pub fn parse<R>(mut reader: R) -> RedisResult<Value> where R: BufRead {
+        let mut buffer = Vec::new();
+        reader.read_until(b'\n', &mut buffer)?;
+        value().parse(&buffer[..])
             .map(|(value, _)| value)
             .map_err(|err| {
                 RedisError::from((ErrorKind::ResponseError, "parse error", format!("{:?}", err))) //err.map_range(|range| format!("{:?}", range)).to_string()))
@@ -97,7 +97,7 @@ pub struct Parser<T> {
 /// you normally do not use this directly as it's already done for you by
 /// the client but in some more complex situations it might be useful to be
 /// able to parse the redis responses.
-impl<'a, T: Read> Parser<T> {
+impl<'a, T: BufRead> Parser<T> {
     /// Creates a new parser that parses the data behind the reader.  More
     /// than one value can be behind the reader in which case the parser can
     /// be invoked multiple times.  In other words: the stream does not have
