@@ -1,7 +1,82 @@
-use std::io::{Read, BufReader};
+use std::io::{BufReader, Read};
 
-use types::{RedisResult, Value, ErrorKind, make_extension_error};
+use types::{make_extension_error, ErrorKind, RedisResult, Value};
 
+
+mod combine_parser {
+    use std::str;
+
+    use types::{make_extension_error, ErrorKind, RedisResult, Value};
+
+    use combine::{self, Parser, Stream};
+    use combine::primitives::RangeStream;
+    use combine::byte::{byte, crlf, newline};
+    use combine::range::{take, take_while};
+
+    parser!{
+        fn value['a, I]()(I) -> Value
+            where [I: Stream<Item = u8, Range = &'a [u8]> + RangeStream]
+        {
+            let end_of_line = || crlf().or(newline());
+            let line = || take_while(|c| c != b'\r' && c != b'\n')
+                .skip(end_of_line())
+                .and_then(|line: &[u8]| str::from_utf8(line));
+
+            let status = || line().map(|line| {
+                if line == "OK" {
+                    Value::Okay
+                } else {
+                    Value::Status(line.into())
+                }
+            });
+            let int = || line().and_then(|line| {
+                match line.trim().parse::<i64>() {
+                    Err(_) => Err(combine::primitives::Error::Message("Expected integer, got garbage".into())),
+                    Ok(value) => Ok(value),
+                }
+            });
+            let data = || int().then(|size| take(size as usize).skip(end_of_line()).map(|bs: &[u8]| bs.to_vec()));
+            let bulk = || {
+                int().then(|length| {
+                    // FIXME Don't box the parsers here
+                    if length < 0 {
+                        combine::value(Value::Nil).boxed()
+                    } else {
+                        let length = length as usize;
+                        combine::count_min_max(length, length, value()).map(Value::Bulk).boxed()
+                    }
+                })
+            };
+            let error = || {
+                line()
+                    .and_then(|line: &str| -> RedisResult<_> {
+                        let desc = "An error was signalled by the server";
+                        let mut pieces = line.splitn(2, ' ');
+                        let kind = match pieces.next().unwrap() {
+                            "ERR" => ErrorKind::ResponseError,
+                            "EXECABORT" => ErrorKind::ExecAbortError,
+                            "LOADING" => ErrorKind::BusyLoadingError,
+                            "NOSCRIPT" => ErrorKind::NoScriptError,
+                            code => {
+                                fail!(make_extension_error(code, pieces.next()))
+                            }
+                        };
+                        match pieces.next() {
+                            Some(detail) => fail!((kind, desc, detail.to_string())),
+                            None => fail!(((kind, desc))),
+                        }
+                    })
+            };
+            choice!(
+               byte(b'+').with(status()),
+               byte(b':').with(int().map(Value::Int)),
+               byte(b'$').with(data().map(Value::Data)),
+               byte(b'*').with(bulk()),
+               byte(b'-').with(error())
+            )
+        }
+    }
+}
 
 /// The internal redis response parser.
 pub struct Parser<T> {
@@ -34,7 +109,10 @@ impl<'a, T: Read> Parser<T> {
             '$' => self.parse_data(),
             '*' => self.parse_bulk(),
             '-' => self.parse_error(),
-            _ => fail!((ErrorKind::ResponseError, "Invalid response when parsing value")),
+            _ => fail!((
+                ErrorKind::ResponseError,
+                "Invalid response when parsing value"
+            )),
         }
     }
 
@@ -80,7 +158,10 @@ impl<'a, T: Read> Parser<T> {
 
     fn read_string_line(&mut self) -> RedisResult<String> {
         match String::from_utf8(try!(self.read_line())) {
-            Err(_) => fail!((ErrorKind::ResponseError, "Expected valid string, got garbage")),
+            Err(_) => fail!((
+                ErrorKind::ResponseError,
+                "Expected valid string, got garbage"
+            )),
             Ok(value) => Ok(value),
         }
     }

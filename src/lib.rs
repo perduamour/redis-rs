@@ -310,6 +310,8 @@
 
 #![deny(non_camel_case_types)]
 
+#[macro_use]
+extern crate combine;
 extern crate url;
 extern crate sha1;
 
