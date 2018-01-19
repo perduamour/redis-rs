@@ -84,12 +84,21 @@ mod combine_parser {
 
     pub fn parse<R>(mut reader: R) -> RedisResult<Value> where R: BufRead {
         let mut buffer = Vec::new();
-        reader.read_until(b'\n', &mut buffer)?;
-        value().easy_parse(&buffer[..])
-            .map(|(value, _)| value)
-            .map_err(|err| {
-                RedisError::from((ErrorKind::ResponseError, "parse error", format!("{:?}", err))) //err.map_range(|range| format!("{:?}", range)).to_string()))
-            })
+        loop {
+            reader.read_until(b'\n', &mut buffer)?;
+            match value().easy_parse(&buffer[..]) {
+                Ok((value, _)) => return Ok(value),
+                Err(err) => {
+                    let unexpected_end_of_input = err.errors.iter().any(|err| *err == combine::easy::Error::end_of_input());
+                    if !unexpected_end_of_input {
+                        let err = err.map_position(|pos| pos.translate_position(&buffer))
+                            .map_range(|range| format!("{:?}", range))
+                            .to_string();
+                        return Err(RedisError::from((ErrorKind::ResponseError, "parse error", err)))
+                    }
+                }
+            }
+        }
     }
 }
 
