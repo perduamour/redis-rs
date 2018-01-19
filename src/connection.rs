@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::io::{Read, BufReader, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{self, TcpStream};
 use std::str::from_utf8;
 use std::cell::RefCell;
@@ -158,7 +158,7 @@ impl IntoConnectionInfo for url::Url {
 enum ActualConnection {
     Tcp(BufReader<TcpStream>),
     #[cfg(any(feature="with-unix-sockets", feature="with-system-unix-sockets"))]
-    Unix(UnixStream),
+    Unix(BufReader<UnixStream>),
 }
 
 /// Represents a stateful redis TCP connection.
@@ -192,7 +192,7 @@ impl ActualConnection {
             }
             #[cfg(any(feature="with-unix-sockets", feature="with-system-unix-sockets"))]
             ConnectionAddr::Unix(ref path) => {
-                ActualConnection::Unix(try!(UnixStream::connect(path)))
+                ActualConnection::Unix(BufReader::new(try!(UnixStream::connect(path))))
             }
             #[cfg(not(any(feature="with-unix-sockets", feature="with-system-unix-sockets")))]
             ConnectionAddr::Unix(ref path) => {
@@ -207,7 +207,7 @@ impl ActualConnection {
         let w = match *self {
             ActualConnection::Tcp(ref mut reader) => reader.get_mut() as &mut Write,
             #[cfg(any(feature="with-unix-sockets", feature="with-system-unix-sockets"))]
-            ActualConnection::Unix(ref mut sock) => &mut *sock as &mut Write,
+            ActualConnection::Unix(ref mut sock) => sock.get_mut() as &mut Write,
         };
         try!(w.write(bytes));
         Ok(Value::Okay)
@@ -215,9 +215,9 @@ impl ActualConnection {
 
     pub fn read_response(&mut self) -> RedisResult<Value> {
         let result = Parser::new(match *self {
-                ActualConnection::Tcp(ref mut reader) => reader as &mut Read,
+                ActualConnection::Tcp(ref mut reader) => reader as &mut BufRead,
                 #[cfg(any(feature="with-unix-sockets", feature="with-system-unix-sockets"))]
-            ActualConnection::Unix(ref mut sock) => &mut *sock as &mut Read,
+            ActualConnection::Unix(ref mut sock) => &mut *sock as &mut BufRead,
             })
             .parse_value();
         // shutdown connection on protocol error
@@ -229,7 +229,7 @@ impl ActualConnection {
                     }
                     #[cfg(any(feature="with-unix-sockets", feature="with-system-unix-sockets"))]
                     ActualConnection::Unix(ref mut sock) => {
-                        let _ = sock.shutdown(net::Shutdown::Both);
+                        let _ = sock.get_mut().shutdown(net::Shutdown::Both);
                     }
                 }
             }
@@ -245,7 +245,7 @@ impl ActualConnection {
             }
             #[cfg(any(feature="with-unix-sockets", feature="with-system-unix-sockets"))]
             ActualConnection::Unix(ref sock) => {
-                try!(sock.set_write_timeout(dur));
+                try!(sock.get_ref().set_write_timeout(dur));
             }
         }
         Ok(())
@@ -258,7 +258,7 @@ impl ActualConnection {
             }
             #[cfg(any(feature="with-unix-sockets", feature="with-system-unix-sockets"))]
             ActualConnection::Unix(ref sock) => {
-                try!(sock.set_read_timeout(dur));
+                try!(sock.get_ref().set_read_timeout(dur));
             }
         }
         Ok(())
