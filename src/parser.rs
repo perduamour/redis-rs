@@ -39,12 +39,11 @@ mod combine_parser {
             let data = || int().then(|size| take(size as usize).skip(end_of_line()).map(|bs: &[u8]| bs.to_vec()));
             let bulk = || {
                 int().then(|length| {
-                    // FIXME Don't box the parsers here
                     if length < 0 {
-                        combine::value(Value::Nil).boxed()
+                        combine::value(Value::Nil).left()
                     } else {
                         let length = length as usize;
-                        combine::count_min_max(length, length, value()).map(Value::Bulk).boxed()
+                        combine::count_min_max(length, length, value()).map(Value::Bulk).right()
                     }
                 })
             };
