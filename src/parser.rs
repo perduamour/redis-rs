@@ -1,4 +1,4 @@
-use std::io::{BufReader, BufRead};
+use std::io::{BufReader, Read};
 
 use types::{make_extension_error, ErrorKind, RedisResult, Value};
 
@@ -111,7 +111,7 @@ pub struct Parser<T> {
 /// you normally do not use this directly as it's already done for you by
 /// the client but in some more complex situations it might be useful to be
 /// able to parse the redis responses.
-impl<'a, T: BufRead> Parser<T> {
+impl<'a, T: Read> Parser<T> {
     /// Creates a new parser that parses the data behind the reader.  More
     /// than one value can be behind the reader in which case the parser can
     /// be invoked multiple times.  In other words: the stream does not have
@@ -123,12 +123,6 @@ impl<'a, T: BufRead> Parser<T> {
     // public api
 
     pub fn parse_value(&mut self) -> RedisResult<Value> {
-        combine_parser::parse(&mut self.reader)
-    }
-    /// parses a single value out of the stream.  If there are multiple
-    /// values you can call this multiple times.  If the reader is not yet
-    /// ready this will block.
-    pub fn parse_value2(&mut self) -> RedisResult<Value> {
         let b = try!(self.read_byte());
         match b as char {
             '+' => self.parse_status(),
