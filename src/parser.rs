@@ -3,7 +3,8 @@ use std::io::{BufReader, Read};
 use types::{make_extension_error, ErrorKind, RedisResult, Value};
 
 
-mod combine_parser {
+pub mod combine_parser {
+    use std::any::Any;
     use std::str;
     use std::io::BufRead;
 
@@ -15,17 +16,23 @@ mod combine_parser {
     use combine::primitives::StreamError;
     use combine::byte::{byte, crlf, newline};
     use combine::range::{take, take_while};
+    use combine::combinator::no_partial;
+
+    use futures::{Future, Poll, Async};
+    use tokio_io::AsyncRead;
 
     parser!{
+        type PartialState = Option<Box<Any>>;
         fn value['a, I]()(I) -> Value
             where [I: Stream<Item = u8, Range = &'a [u8], Error = combine::easy::StreamErrors<I>> + RangeStream,
                    // FIXME This shouldn't be necessary but rustc is currently unable to figure out
                    // this type
                    I::Error: combine::primitives::ParseError<I::Item, I::Range, I::Position, StreamError = combine::easy::Error<I::Item, I::Range>> ]
         {
+
             let end_of_line = || crlf().or(newline());
-            let line = || take_while(|c| c != b'\r' && c != b'\n')
-                .skip(end_of_line())
+            // TODO Allow partial parsing for this part
+            let line = || no_partial(take_while(|c| c != b'\r' && c != b'\n').skip(end_of_line()))
                 .and_then(|line: &[u8]| str::from_utf8(line).map_err(combine::easy::Error::other));
 
             let status = || line().map(|line| {
@@ -41,9 +48,9 @@ mod combine_parser {
                     Ok(value) => Ok(value),
                 }
             });
-            let data = || int().then(|size| take(size as usize).skip(end_of_line()).map(|bs: &[u8]| bs.to_vec()));
+            let data = || int().then_partial(|size| take(*size as usize).map(|bs: &[u8]| bs.to_vec()).skip(end_of_line()));
             let bulk = || {
-                int().then(|length| {
+                int().then_partial(|&mut length| {
                     if length < 0 {
                         combine::value(Value::Nil).left()
                     } else {
@@ -82,22 +89,50 @@ mod combine_parser {
         }
     }
 
-    pub fn parse<R>(mut reader: R) -> RedisResult<Value> where R: BufRead {
-        let mut buffer = Vec::new();
-        loop {
-            reader.read_until(b'\n', &mut buffer)?;
-            match value().easy_parse(&buffer[..]) {
-                Ok((value, _)) => return Ok(value),
-                Err(err) => {
-                    let unexpected_end_of_input = err.errors.iter().any(|err| *err == combine::easy::Error::end_of_input());
-                    if !unexpected_end_of_input {
-                        let err = err.map_position(|pos| pos.translate_position(&buffer))
+    pub struct ValueFuture<R> {
+        reader: Option<R>,
+        buffer: Vec<u8>,
+        state: Option<Box<Any>>,
+    }
+
+    impl<R> Future for ValueFuture<R>
+        where R: AsyncRead
+    {
+        type Item = (R, Value);
+        type Error = RedisError;
+
+        fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+            assert!(self.reader.is_some(), "ValueFuture: poll called on completed future");
+            // FIXME reserve data before reading?
+            try_ready!(self.reader.as_mut().unwrap().read_buf(&mut self.buffer));
+            let (opt, removed) = {
+                let stream = combine::easy::Stream(combine::primitives::PartialStream(&self.buffer[..]));
+                match combine::async::decode(value(), stream, &mut self.state) {
+                    Ok(x) => x,
+                    Err(err) => {
+                        let err = err.map_position(|pos| pos.translate_position(&self.buffer[..]))
                             .map_range(|range| format!("{:?}", range))
                             .to_string();
                         return Err(RedisError::from((ErrorKind::ResponseError, "parse error", err)))
                     }
                 }
+            };
+
+            match opt {
+                Some(value) => return Ok(Async::Ready((self.reader.take().unwrap(), value))),
+                None => {
+                    self.buffer.drain(..removed);
+                    Ok(Async::NotReady)
+                }
             }
+        }
+    }
+
+    pub fn parse<R>(reader: R) -> ValueFuture<R> where R: AsyncRead {
+        ValueFuture {
+            reader: Some(reader),
+            buffer: Vec::new(),
+            state: None,
         }
     }
 }
