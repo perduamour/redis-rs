@@ -18,7 +18,7 @@ build = "build.rs"
 
 [features]
 with-rustc-json = ["rustc-serialize"]
-with-unix-sockets = ["unix_socket"]
+with-unix-sockets = ["unix_socket", "tokio-uds"]
 with-system-unix-sockets = []
 
 [dependencies]
@@ -30,6 +30,7 @@ combine = { git = "https://github.com/Marwes/combine", branch = "partial_parsing
 futures = "0.1"
 tokio-core = "0.1"
 tokio-io = "0.1"
+tokio-uds = { version = "0.1.0", optional = true }
 
 [dev-dependencies]
 rand = "0.3"

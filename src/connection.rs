@@ -162,8 +162,7 @@ enum ActualConnection {
 }
 
 /// Represents a stateful redis TCP connection.
-pub struct Connection {
-    con: RefCell<ActualConnection>,
+pub struct Connection { con: RefCell<ActualConnection>,
     db: i64,
 }
 
@@ -625,34 +624,98 @@ pub fn transaction<K: ToRedisArgs,
 
 pub mod async {
 
+    use std::fmt::Arguments;
+    use std::io::{self, Read, Write, BufReader};
     use std::net::SocketAddr;
     use std::mem;
-    use std::io::BufReader;
 
-    use tokio_io;
+    #[cfg(feature="with-unix-sockets")]
+    use tokio_uds::UnixStream;
+
+    use tokio_io::{self, AsyncWrite};
     use tokio_core::reactor;
     use tokio_core::net::TcpStream;
 
-    use futures::{future, Async, Future};
+    use futures::{future, Async, Future, Poll};
     use futures::future::Either;
 
     use cmd::cmd;
-    use types::{ErrorKind, RedisError, RedisFuture, Value};
+    use types::{ErrorKind, RedisFuture, Value};
+    #[cfg(not(feature="with-unix-sockets"))]
+    use types::RedisError;
 
     use connection::{ConnectionAddr, ConnectionInfo};
 
+    enum ActualConnection {
+        Tcp(BufReader<TcpStream>),
+        #[cfg(feature="with-unix-sockets")]
+        Unix(BufReader<UnixStream>),
+    }
+
+    struct WriteWrapper<T>(BufReader<T>);
+
+    impl<T> Write for WriteWrapper<T> where T: Read + Write {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.get_mut().write(buf)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.0.get_mut().flush()
+        }
+
+        fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+            self.0.get_mut().write_all(buf)
+        }
+        fn write_fmt(&mut self, fmt: Arguments) -> io::Result<()> {
+            self.0.get_mut().write_fmt(fmt)
+        }
+    }
+
+    impl<T> AsyncWrite for WriteWrapper<T> where T: Read + AsyncWrite {
+        fn shutdown(&mut self) -> Poll<(), io::Error> {
+            self.0.get_mut().shutdown()
+        }
+    }
+
     /// Represents a stateful redis TCP connection.
     pub struct Connection {
-        con: TcpStream,
+        con: ActualConnection,
         db: i64,
+    }
+
+    macro_rules! with_connection {
+        ($con: expr, $f: expr) => {
+            match $con {
+                #[cfg(not(feature="with-unix-sockets"))]
+                ActualConnection::Tcp(con) => $f(con).map(|(con, value)| (ActualConnection::Tcp(con), value)),
+
+                #[cfg(feature="with-unix-sockets")]
+                ActualConnection::Tcp(con) => Either::A($f(con).map(|(con, value)| (ActualConnection::Tcp(con), value))),
+                #[cfg(feature="with-unix-sockets")]
+                ActualConnection::Unix(con) => Either::B($f(con).map(|(con, value)| (ActualConnection::Unix(con), value))),
+            }
+        }
+    }
+
+    macro_rules! with_write_connection {
+        ($con: expr, $f: expr) => {
+            match $con {
+                #[cfg(not(feature="with-unix-sockets"))]
+                ActualConnection::Tcp(con) => $f(WriteWrapper(con)).map(|(con, value)| (ActualConnection::Tcp(con.0), value)),
+
+                #[cfg(feature="with-unix-sockets")]
+                ActualConnection::Tcp(con) => Either::A($f(WriteWrapper(con)).map(|(con, value)| (ActualConnection::Tcp(con.0), value))),
+                #[cfg(feature="with-unix-sockets")]
+                ActualConnection::Unix(con) => Either::B($f(WriteWrapper(con)).map(|(con, value)| (ActualConnection::Unix(con.0), value))),
+            }
+        }
     }
 
     impl Connection {
         pub fn read_response(self) -> RedisFuture<(Self, Value)> {
             let db = self.db;
-            Box::new(::parser::parse_async(BufReader::new(self.con)).then(move |result| {
+            Box::new(with_connection!(self.con, ::parser::parse_async).then(move |result| {
                 match result {
-                    Ok((con, value)) => Ok((Connection { con: con.into_inner(), db }, value)),
+                    Ok((con, value)) => Ok((Connection { con: con, db }, value)),
                     Err(err) => {
                         // TODO Do we need to shutdown here as we do in the sync version?
                         Err(err)
@@ -668,18 +731,24 @@ pub mod async {
             ConnectionAddr::Tcp(ref host, ref port) => {
                 let host: &str = &*host;
                 // FIXME remove unwrap, make host IpAddr before this point?
-                TcpStream::connect(&SocketAddr::new(host.parse().unwrap(), *port), handle)
+                Either::A(
+                    TcpStream::connect(&SocketAddr::new(host.parse().unwrap(), *port), handle)
+                      .from_err()
+                      .map(|con| ActualConnection::Tcp(BufReader::new(con)))
+                )
             }
-            #[cfg(any(feature="with-unix-sockets", feature="with-system-unix-sockets"))]
-            ConnectionAddr::Unix(_) => {
-                return Box::new(future::err(RedisError::from((ErrorKind::InvalidClientConfig,
-                       "Cannot connect to unix sockets asynchronously"))));
+            #[cfg(feature="with-unix-sockets")]
+            ConnectionAddr::Unix(ref path) => {
+                let result = UnixStream::connect(path, handle).map(|stream| {
+                    ActualConnection::Unix(BufReader::new(stream))
+                });
+                Either::B(future::result(result))
             }
-            #[cfg(not(any(feature="with-unix-sockets", feature="with-system-unix-sockets")))]
+            #[cfg(not(feature="with-unix-sockets"))]
             ConnectionAddr::Unix(_) => {
-                return Box::new(future::err(RedisError::from((ErrorKind::InvalidClientConfig,
+                Either::B(future::err(RedisError::from((ErrorKind::InvalidClientConfig,
                        "Cannot connect to unix sockets \
-                       on this platform"))));
+                       on this platform"))))
             }
         };
 
@@ -749,9 +818,11 @@ pub mod async {
     impl ConnectionLike for Connection {
         fn req_packed_command(self, cmd: Vec<u8>) -> RedisFuture<(Self, Value)> {
             let db = self.db;
-            Box::new(tokio_io::io::write_all(self.con, cmd).from_err().and_then(move |(con, _)| {
-                Connection { con, db }.read_response()
-            }))
+            Box::new(with_write_connection!(self.con, |con| tokio_io::io::write_all(con, cmd))
+                 .from_err()
+                 .and_then(move |(con, _)| {
+                    Connection { con, db }.read_response()
+                }))
         }
 
         fn req_packed_commands(
@@ -761,7 +832,7 @@ pub mod async {
             count: usize,
         ) -> RedisFuture<(Self, Vec<Value>)> {
             let db = self.db;
-            Box::new(tokio_io::io::write_all(self.con, cmd).from_err().and_then(move |(con, _)| {
+            Box::new(with_write_connection!(self.con, |con| tokio_io::io::write_all(con, cmd)).from_err().and_then(move |(con, _)| {
                 let mut con = Some(Connection { con, db });
                 let mut rv = vec![];
                 let mut future = None;

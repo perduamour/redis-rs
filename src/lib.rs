@@ -323,6 +323,8 @@ extern crate tokio_io;
 
 #[cfg(feature = "with-unix-sockets")]
 extern crate unix_socket;
+#[cfg(feature = "with-unix-sockets")]
+extern crate tokio_uds;
 #[cfg(feature = "with-rustc-json")]
 pub extern crate rustc_serialize as serialize;
 
