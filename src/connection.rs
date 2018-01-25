@@ -626,7 +626,6 @@ pub fn transaction<K: ToRedisArgs,
 pub mod async {
 
     use std::net::SocketAddr;
-    use std::cell::RefCell;
     use std::mem;
     use std::io::BufReader;
 
@@ -638,7 +637,7 @@ pub mod async {
     use futures::future::Either;
 
     use cmd::cmd;
-    use types::{ErrorKind, RedisError, RedisResult, RedisFuture, Value};
+    use types::{ErrorKind, RedisError, RedisFuture, Value};
 
     use connection::{ConnectionAddr, ConnectionInfo};
 
@@ -745,36 +744,6 @@ pub mod async {
         /// also might be incorrect if the connection like object is not
         /// actually connected.
         fn get_db(&self) -> i64;
-    }
-
-    pub struct ConnectionLikeWrapper<T>(RefCell<Option<T>>);
-
-    impl<T> ::connection::ConnectionLike for ConnectionLikeWrapper<T> where T: ConnectionLike {
-        fn req_packed_command(&self, cmd: &[u8]) -> RedisResult<Value> {
-            let mut con = self.0.borrow_mut();
-            let (con_, value) = con.take().unwrap().req_packed_command(cmd.into()).wait()?;
-            *con = Some(con_);
-            Ok(value)
-        }
-
-        /// Sends multiple already encoded (packed) command into the TCP socket
-        /// and reads `count` responses from it.  This is used to implement
-        /// pipelining.
-        fn req_packed_commands(
-            &self,
-            cmd: &[u8],
-            offset: usize,
-            count: usize,
-        ) -> RedisResult<Vec<Value>> {
-            let mut con = self.0.borrow_mut();
-            let (con_, value) = con.take().unwrap().req_packed_commands(cmd.into(), offset, count).wait()?;
-            *con = Some(con_);
-            Ok(value)
-        }
-
-        fn get_db(&self) -> i64 {
-            self.0.borrow().as_ref().unwrap().get_db()
-        }
     }
 
     impl ConnectionLike for Connection {
