@@ -651,7 +651,7 @@ pub mod async {
     impl Connection {
         pub fn read_response(self) -> RedisFuture<(Self, Value)> {
             let db = self.db;
-            Box::new(::parser::combine_parser::parse(BufReader::new(self.con)).then(move |result| {
+            Box::new(::parser::parse_async(BufReader::new(self.con)).then(move |result| {
                 match result {
                     Ok((con, value)) => Ok((Connection { con: con.into_inner(), db }, value)),
                     Err(err) => {
