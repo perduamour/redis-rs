@@ -143,6 +143,7 @@ parser!{
 pub struct ValueFuture<R> {
     reader: Option<R>,
     state: Option<Box<Any>>,
+    remaining: Vec<u8>,
     last_buf_len: Option<usize>,
 }
 
@@ -158,9 +159,17 @@ where
             self.reader.is_some(),
             "ValueFuture: poll called on completed future"
         );
-        let (opt, removed) = {
+        let remaining_data = self.remaining.len();
+
+        let (opt, mut removed) = {
             let buffer = try_nb!(self.reader.as_mut().unwrap().fill_buf());
             self.last_buf_len = Some(buffer.len());
+            let buffer = if !self.remaining.is_empty() {
+                self.remaining.extend(buffer);
+                &self.remaining[..]
+            } else {
+                buffer
+            };
             let stream = combine::easy::Stream(combine::primitives::PartialStream(buffer));
             match combine::async::decode(value(), stream, &mut self.state) {
                 Ok(x) => x,
@@ -175,13 +184,31 @@ where
             }
         };
 
-        self.reader.as_mut().unwrap().consume(removed);
+        if !self.remaining.is_empty() {
+            self.remaining.drain(..removed);
+            if removed >= remaining_data {
+                removed = removed - remaining_data;
+            } else {
+                removed = 0;
+            }
+        }
+
         match opt {
             Some(value) => {
+                self.reader.as_mut().unwrap().consume(removed);
                 let reader = self.reader.take().unwrap();
                 return Ok(Async::Ready((reader, value?)));
             }
-            None => Ok(Async::NotReady),
+            None => {
+                let buffer_len = {
+                    let buffer = try!(self.reader.as_mut().unwrap().fill_buf());
+                    self.remaining.extend(&buffer[removed..]);
+                    buffer.len()
+                };
+                self.reader.as_mut().unwrap().consume(buffer_len);
+                try_nb!(self.reader.as_mut().unwrap().fill_buf());
+                Ok(Async::NotReady)
+            }
         }
     }
 }
@@ -193,6 +220,7 @@ where
     ValueFuture {
         reader: Some(reader),
         state: None,
+        remaining: Vec::new(),
         last_buf_len: None,
     }
 }
@@ -204,6 +232,7 @@ where
     let mut parser = ValueFuture {
         reader: Some(reader),
         state: None,
+        remaining: Vec::new(),
         last_buf_len: None,
     };
     loop {

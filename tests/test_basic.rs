@@ -649,12 +649,8 @@ quickcheck!{
         let partial_reader = PartialAsyncRead::new(reader, seq);
         let mut core = reactor::Core::new().unwrap();
 
-        let timeout = reactor::Timeout::new(Duration::from_secs(1), &core.handle())
-            .unwrap()
-            .then(|_| future::err(redis::RedisError::from((redis::ErrorKind::IoError, "Timeout"))));
-        let result = core.run(redis::parse_async(BufReader::new(partial_reader)).select(timeout))
-            .map(|t| (t.0).1)
-            .map_err(|e| e.0);
+        let result = core.run(redis::parse_async(BufReader::new(partial_reader)))
+            .map(|t| t.1);
 
         assert!(result.as_ref().is_ok(), "{}", result.unwrap_err());
         assert_eq!(
