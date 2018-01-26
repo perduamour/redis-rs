@@ -1,6 +1,12 @@
 extern crate redis;
 extern crate rand; extern crate net2;
 
+#[macro_use]
+extern crate quickcheck;
+extern crate partial_io;
+extern crate futures;
+extern crate tokio_core;
+
 use redis::{Commands, PipelineCommands};
 
 use std::thread::{spawn, sleep};
@@ -554,4 +560,106 @@ fn test_invalid_protocol() {
     assert_eq!(result.unwrap_err().kind(), redis::ErrorKind::IoError);
 
     child.join().unwrap().unwrap();
+}
+
+use std::io;
+
+use futures::{future, Future};
+
+use partial_io::{GenWouldBlock, PartialAsyncRead, PartialWithErrors};
+use tokio_core::reactor;
+
+use redis::Value; 
+
+#[derive(Clone, Debug)]
+struct ArbitraryValue(Value);
+impl ::quickcheck::Arbitrary for ArbitraryValue {
+    fn arbitrary<G : ::quickcheck::Gen>(g: &mut G) -> Self {
+        let size = g.size();
+        ArbitraryValue(arbitrary_value(g, size))
+    }
+    fn shrink(&self) -> Box<Iterator<Item=Self>> {
+        match self.0 {
+            Value::Nil | Value::Okay => Box::new(None.into_iter()),
+            Value::Int(i) => Box::new(i.shrink().map(Value::Int).map(ArbitraryValue)),
+            Value::Data(ref xs) => Box::new(xs.shrink().map(Value::Data).map(ArbitraryValue)),
+            Value::Bulk(ref xs) => {
+                let ys = xs.iter().map(|x| ArbitraryValue(x.clone())).collect::<Vec<_>>();
+                Box::new(ys.shrink().map(|xs| xs.into_iter().map(|x| x.0).collect()).map(Value::Bulk).map(ArbitraryValue))
+            }
+            Value::Status(ref status) => Box::new(status.shrink().map(Value::Status).map(ArbitraryValue)),
+        }
+    }
+}
+
+fn arbitrary_value<G : ::quickcheck::Gen>(g: &mut G, recursive_size: usize) -> Value {
+    use quickcheck::Arbitrary;
+    if recursive_size == 0 {
+        Value::Nil
+    } else {
+        match g.gen_range(0, 6) {
+            0 => Value::Nil,
+            1 => Value::Int(Arbitrary::arbitrary(g)),
+            2 => Value::Data(Arbitrary::arbitrary(g)),
+            3 => {
+                let size = { let s = g.size(); g.gen_range(0, s) };
+                Value::Bulk((0..size).map(|_| arbitrary_value(g, recursive_size / size)).collect())
+            }
+            4 => {
+                let size = { let s = g.size(); g.gen_range(0, s) };
+                Value::Status(g.gen_ascii_chars().take(size).collect())
+            }
+            5 => Value::Okay,
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[doc(hidden)]
+pub fn encode_value<W>(value: &Value, writer: &mut W) -> io::Result<()> where W: io::Write {
+    match *value {
+        Value::Nil => write!(writer, "$-1\r\n"),
+        Value::Int(val) => write!(writer, ":{}\r\n", val),
+        Value::Data(ref val) => {
+            try!(write!(writer, "${}\r\n", val.len()));
+            writer.write_all(val)
+        }
+        Value::Bulk(ref values) => {
+            try!(write!(writer, "*{}\r\n", values.len()));
+            for val in values.iter() {
+                try!(encode_value(val, writer));
+            }
+            Ok(())
+        }
+        Value::Okay => write!(writer, "+OK\r\n"),
+        Value::Status(ref s) => write!(writer, "+{}\r\n", s),
+    }
+}
+
+quickcheck!{
+    fn partial_io_parse(input: ArbitraryValue, seq: PartialWithErrors<GenWouldBlock>) -> () {
+        println!("{:?}", input);
+        let input = ArbitraryValue(Value::Bulk(vec![]));
+        let seq = vec![partial_io::PartialOp::Limited(2)];
+
+        let mut encoded_input = Vec::new();
+        encode_value(&input.0, &mut encoded_input).unwrap();
+
+        let reader = io::Cursor::new(&encoded_input[..]);
+        let partial_reader = PartialAsyncRead::new(reader, seq);
+        let mut core = reactor::Core::new().unwrap();
+
+        let timeout = reactor::Timeout::new(Duration::from_secs(1), &core.handle())
+            .unwrap()
+            .then(|_| future::err(redis::RedisError::from((redis::ErrorKind::IoError, "Timeout"))));
+        let result = core.run(redis::parse_async(BufReader::new(partial_reader)).select(timeout))
+            .map(|t| (t.0).1)
+            .map_err(|e| e.0);
+
+        assert!(result.as_ref().is_ok(), "{}", result.unwrap_err());
+        assert_eq!(
+            result.unwrap(),
+            input.0,
+        );
+    }
 }

@@ -9,8 +9,7 @@ use combine::primitives::RangeStream;
 #[allow(unused_imports)] // See https://github.com/rust-lang/rust/issues/43970
 use combine::primitives::StreamError;
 use combine::byte::{byte, crlf, newline};
-use combine::range::{take, take_while};
-use combine::combinator::no_partial;
+use combine::range::{take, take_until_range, recognize};
 
 use futures::{Async, Future, Poll};
 use tokio_io::AsyncRead;
@@ -67,10 +66,9 @@ parser!{
                // this type
                I::Error: combine::primitives::ParseError<I::Item, I::Range, I::Position, StreamError = combine::easy::Error<I::Item, I::Range>> ]
     {
-        let end_of_line = || crlf().or(newline());
-        // TODO Allow partial parsing for this part
-        let line = || no_partial(take_while(|c| c != b'\r' && c != b'\n').skip(end_of_line()))
-            .and_then(|line: &[u8]| str::from_utf8(line).map_err(combine::easy::Error::other));
+        let end_of_line: fn () -> _ = || crlf().or(newline());
+        let line = || recognize(take_until_range(&b"\r\n"[..]).with(end_of_line()))
+            .and_then(|line: &[u8]| str::from_utf8(&line[..line.len() - 2]).map_err(combine::easy::Error::other));
 
         let status = || line().map(|line| {
             if line == "OK" {
@@ -87,7 +85,7 @@ parser!{
             }
         });
 
-        let data = || int().then_partial(|size| {
+        let data = || int().then_partial(move |size| {
             if *size < 0 {
                 combine::value(Value::Nil).left()
             } else {

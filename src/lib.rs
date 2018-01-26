@@ -333,7 +333,7 @@ pub extern crate rustc_serialize as serialize;
 pub use serialize::json::Json;
 
 // public api
-pub use parser::{parse_redis_value, Parser};
+pub use parser::{parse_redis_value, parse_async, Parser};
 pub use client::Client;
 pub use script::{Script, ScriptInvocation};
 pub use connection::{parse_redis_url, transaction, Connection, ConnectionAddr, ConnectionInfo,

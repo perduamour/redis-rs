@@ -138,7 +138,6 @@ impl fmt::Debug for Value {
     }
 }
 
-
 /// Represents a redis error.  For the most part you should be using
 /// the Error trait to interact with this rather than the actual
 /// struct.
