@@ -13,30 +13,32 @@ use combine::range::{take, take_until_range, recognize};
 use futures::{Async, Future, Poll};
 use tokio_io::AsyncRead;
 
-struct ResultExtend(Result<Vec<Value>, RedisError>);
+struct ResultExtend<T, E>(Result<T, E>);
 
-impl Default for ResultExtend {
+impl<T, E> Default for ResultExtend<T, E> where T: Default {
     fn default() -> Self {
-        ResultExtend(Ok(Vec::new()))
+        ResultExtend(Ok(T::default()))
     }
 }
 
-impl Extend<RedisResult<Value>> for ResultExtend {
+impl<T, U, E> Extend<Result<U, E>> for ResultExtend<T, E>
+    where T: Extend<U>
+{
     fn extend<I>(&mut self, iter: I)
     where
-        I: IntoIterator<Item = RedisResult<Value>>,
+        I: IntoIterator<Item = Result<U, E>>,
     {
         let mut returned_err = None;
         match self.0 {
-            Ok(ref mut elems) => for item in iter {
+            Ok(ref mut elems) => elems.extend(iter.into_iter().scan((), |_, item| {
                 match item {
-                    Ok(item) => elems.push(item),
+                    Ok(item) => Some(item),
                     Err(err) => {
                         returned_err = Some(err);
-                        break;
+                        None
                     }
                 }
-            },
+            })),
             Err(_) => (),
         }
         if let Some(err) = returned_err {
@@ -90,7 +92,7 @@ parser!{
                     combine::value(Value::Nil).map(Ok).left()
                 } else {
                     let length = length as usize;
-                    combine::count_min_max(length, length, value()).map(|result: ResultExtend| {
+                    combine::count_min_max(length, length, value()).map(|result: ResultExtend<_, _>| {
                         result.0.map(Value::Bulk)
                     }).right()
                 }
