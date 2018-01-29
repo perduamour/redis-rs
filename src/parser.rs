@@ -1,13 +1,12 @@
-use std::any::Any;
 use std::str;
 use std::io::{BufRead, BufReader};
 
 use types::{make_extension_error, ErrorKind, RedisError, RedisResult, Value};
 
-use combine::{self, choice, Stream};
-use combine::primitives::RangeStream;
-#[allow(unused_imports)] // See https://github.com/rust-lang/rust/issues/43970
-use combine::primitives::StreamError;
+use combine::{self, choice, RangeStream};
+use combine::stream::StreamErrorFor;
+use combine::parser::combinator::{any_partial_state, AnyPartialState};
+use combine::error::StreamError;
 use combine::byte::{byte, crlf, newline};
 use combine::range::{take, take_until_range, recognize};
 
@@ -19,18 +18,6 @@ struct ResultExtend(Result<Vec<Value>, RedisError>);
 impl Default for ResultExtend {
     fn default() -> Self {
         ResultExtend(Ok(Vec::new()))
-    }
-}
-
-// TODO Remove
-impl ::std::iter::FromIterator<RedisResult<Value>> for ResultExtend {
-    fn from_iter<I>(iter: I) -> Self
-    where
-        I: IntoIterator<Item = RedisResult<Value>>,
-    {
-        let mut result = Self::default();
-        result.extend(iter);
-        result
     }
 }
 
@@ -59,16 +46,17 @@ impl Extend<RedisResult<Value>> for ResultExtend {
 }
 
 parser!{
-    type PartialState = Option<Box<Any>>;
+    type PartialState = AnyPartialState;
     fn value['a, I]()(I) -> RedisResult<Value>
-        where [I: Stream<Item = u8, Range = &'a [u8], Error = combine::easy::StreamErrors<I>> + RangeStream,
-               // FIXME This shouldn't be necessary but rustc is currently unable to figure out
-               // this type
-               I::Error: combine::primitives::ParseError<I::Item, I::Range, I::Position, StreamError = combine::easy::Error<I::Item, I::Range>> ]
+        where [I: RangeStream<Item = u8, Range = &'a [u8]> ]
     {
         let end_of_line: fn () -> _ = || crlf().or(newline());
         let line = || recognize(take_until_range(&b"\r\n"[..]).with(end_of_line()))
-            .and_then(|line: &[u8]| str::from_utf8(&line[..line.len() - 2]).map_err(combine::easy::Error::other));
+            .and_then(|line: &[u8]| {
+                str::from_utf8(line)
+                    .map(|line| line.trim_right_matches(|c: char| c == '\r' || c == '\n'))
+                    .map_err(StreamErrorFor::<I>::other)
+            });
 
         let status = || line().map(|line| {
             if line == "OK" {
@@ -80,7 +68,7 @@ parser!{
 
         let int = || line().and_then(|line| {
             match line.trim().parse::<i64>() {
-                Err(_) => Err(combine::easy::Error::message_static_message("Expected integer, got garbage")),
+                Err(_) => Err(StreamErrorFor::<I>::message_static_message("Expected integer, got garbage")),
                 Ok(value) => Ok(value),
             }
         });
@@ -125,24 +113,24 @@ parser!{
                     };
                     match pieces.next() {
                         Some(detail) => RedisError::from((kind, desc, detail.to_string())),
-                        None => RedisError::from(((kind, desc))),
+                        None => RedisError::from((kind, desc)),
                     }
                 })
         };
 
-        choice((
+        any_partial_state(choice((
            byte(b'+').with(status().map(Ok)),
            byte(b':').with(int().map(Value::Int).map(Ok)),
            byte(b'$').with(data().map(Ok)),
            byte(b'*').with(bulk()),
            byte(b'-').with(error().map(Err))
-        ))
+        )))
     }
 }
 
 pub struct ValueFuture<R> {
     reader: Option<R>,
-    state: Option<Box<Any>>,
+    state: AnyPartialState,
     remaining: Vec<u8>,
     last_buf_len: Option<usize>,
 }
@@ -170,8 +158,8 @@ where
             } else {
                 buffer
             };
-            let stream = combine::easy::Stream(combine::primitives::PartialStream(buffer));
-            match combine::async::decode(value(), stream, &mut self.state) {
+            let stream = combine::easy::Stream(combine::stream::PartialStream(buffer));
+            match combine::stream::decode(value(), stream, &mut self.state) {
                 Ok(x) => x,
                 Err(err) => {
                     let err = err.map_position(|pos| pos.translate_position(buffer))
@@ -219,7 +207,7 @@ where
 {
     ValueFuture {
         reader: Some(reader),
-        state: None,
+        state: AnyPartialState::default(),
         remaining: Vec::new(),
         last_buf_len: None,
     }
@@ -231,7 +219,7 @@ where
 {
     let mut parser = ValueFuture {
         reader: Some(reader),
-        state: None,
+        state: AnyPartialState::default(),
         remaining: Vec::new(),
         last_buf_len: None,
     };

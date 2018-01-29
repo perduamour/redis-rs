@@ -464,8 +464,8 @@ fn test_nice_hash_api() {
                     ("f4".to_string(), 8)]);
 
     assert_eq!(con.hget("my_hash", &["f2", "f4"]), Ok((2, 8)));
-    assert_eq!(con.hincr("my_hash", "f1", 1), Ok((2)));
-    assert_eq!(con.hincr("my_hash", "f2", 1.5f32), Ok((3.5f32)));
+    assert_eq!(con.hincr("my_hash", "f1", 1), Ok(2));
+    assert_eq!(con.hincr("my_hash", "f2", 1.5f32), Ok(3.5f32));
     assert_eq!(con.hexists("my_hash", "f2"), Ok(true));
     assert_eq!(con.hdel("my_hash", &["f1", "f2"]), Ok(()));
     assert_eq!(con.hexists("my_hash", "f2"), Ok(false));
