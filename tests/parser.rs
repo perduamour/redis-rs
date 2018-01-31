@@ -49,7 +49,12 @@ fn arbitrary_value<G : ::quickcheck::Gen>(g: &mut G, recursive_size: usize) -> V
             }
             4 => {
                 let size = { let s = g.size(); g.gen_range(0, s) };
-                Value::Status(g.gen_ascii_chars().take(size).collect())
+                let status = g.gen_ascii_chars().take(size).collect();
+                if status == "OK" {
+                    Value::Okay
+                } else {
+                    Value::Status(status)
+                }
             }
             5 => Value::Okay,
             _ => unreachable!(),
