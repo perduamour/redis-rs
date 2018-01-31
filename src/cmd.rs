@@ -484,6 +484,51 @@ impl Pipeline {
         }))
     }
 
+    fn execute_pipelined_async<C>(self, con: C) -> RedisFuture<(C, Value)>
+        where C: ::connection::async::ConnectionLike + 'static
+    {
+        Box::new(con.req_packed_commands(
+            encode_pipeline(&self.commands, false),
+            0,
+            self.commands.len()
+        ).map(move |(con, value)| (con, self.make_pipeline_results(value))))
+    }
+
+    fn execute_transaction_async<C>(self, con: C) -> RedisFuture<(C, Value)>
+        where C: ::connection::async::ConnectionLike + 'static
+    {
+        Box::new(con.req_packed_commands(
+            encode_pipeline(&self.commands, true),
+            self.commands.len() + 1,
+            1,
+        ).and_then(move |(con, mut resp)| {
+            match resp.pop() {
+                Some(Value::Nil) => Ok((con, Value::Nil)),
+                Some(Value::Bulk(items)) => Ok((con, self.make_pipeline_results(items))),
+                _ => fail!((ErrorKind::ResponseError, "Invalid response when parsing multi response")),
+            }
+        }))
+    }
+
+
+    #[inline]
+    pub fn query_async<C, T: FromRedisValue>(self, con: C) -> RedisFuture<(C, T)>
+        where C: ::connection::async::ConnectionLike + 'static,
+              T: 'static
+    {
+        use futures::future;
+
+        let future = if self.commands.len() == 0 {
+            return Box::new(future::result(from_redis_value(&Value::Bulk(vec![])).map(|v| (con, v))));
+        } else if self.transaction_mode {
+            self.execute_transaction_async(con)
+        } else {
+            self.execute_pipelined_async(con)
+        };
+        Box::new(future.and_then(|(con, v)| Ok((con, try!(from_redis_value(&v))))))
+    }
+
+
     /// This is a shortcut to `query()` that does not return a value and
     /// will fail the task if the query of the pipeline fails.
     ///

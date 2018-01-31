@@ -838,8 +838,6 @@ pub mod async {
                 let mut future = None;
                 let mut idx = 0;
                 future::poll_fn(move || {
-                    assert!(con.is_some());
-
                     while idx < offset + count {
                         if future.is_none() {
                             future = Some(con.take().unwrap().read_response());

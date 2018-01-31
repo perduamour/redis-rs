@@ -1,4 +1,3 @@
-#![cfg(any(feature = "with-unix-sockets", not(feature = "with-system-unix-sockets")))]
 extern crate redis;
 
 extern crate futures;
@@ -40,20 +39,20 @@ fn test_pipeline_transaction() {
     let connect = ctx.async_connection(&core.handle());
     let con = core.run(connect).unwrap();
 
-    let ((k1, k2),): ((i32, i32),) = core.run(
-        redis::pipe()
-            .atomic()
-            .cmd("SET")
-            .arg("key_1")
-            .arg(42)
-            .ignore()
-            .cmd("SET")
-            .arg("key_2")
-            .arg(43)
-            .ignore()
-            .cmd("MGET")
-            .arg(&["key_1", "key_2"])
-            .query_async(&con),
+    let mut pipe = redis::pipe();
+    pipe.atomic()
+        .cmd("SET")
+        .arg("key_1")
+        .arg(42)
+        .ignore()
+        .cmd("SET")
+        .arg("key_2")
+        .arg(43)
+        .ignore()
+        .cmd("MGET")
+        .arg(&["key_1", "key_2"]);
+    let (_con, ((k1, k2),)): (_, ((i32, i32),)) = core.run(
+            pipe.query_async(con),
     ).unwrap();
 
     assert_eq!(k1, 42);
