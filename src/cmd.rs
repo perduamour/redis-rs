@@ -264,7 +264,7 @@ impl Cmd {
 
     #[inline]
     pub fn query_async<C, T: FromRedisValue>(&self, con: C) -> RedisFuture<(C, T)>
-        where C: ::connection::async::ConnectionLike + 'static,
+        where C: ::async::ConnectionLike + 'static,
               T: 'static
     {
         let pcmd = self.get_packed_command();
@@ -485,7 +485,7 @@ impl Pipeline {
     }
 
     fn execute_pipelined_async<C>(self, con: C) -> RedisFuture<(C, Value)>
-        where C: ::connection::async::ConnectionLike + 'static
+        where C: ::async::ConnectionLike + 'static
     {
         Box::new(con.req_packed_commands(
             encode_pipeline(&self.commands, false),
@@ -495,7 +495,7 @@ impl Pipeline {
     }
 
     fn execute_transaction_async<C>(self, con: C) -> RedisFuture<(C, Value)>
-        where C: ::connection::async::ConnectionLike + 'static
+        where C: ::async::ConnectionLike + 'static
     {
         Box::new(con.req_packed_commands(
             encode_pipeline(&self.commands, true),
@@ -513,7 +513,7 @@ impl Pipeline {
 
     #[inline]
     pub fn query_async<C, T: FromRedisValue>(self, con: C) -> RedisFuture<(C, T)>
-        where C: ::connection::async::ConnectionLike + 'static,
+        where C: ::async::ConnectionLike + 'static,
               T: 'static
     {
         use futures::future;

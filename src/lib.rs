@@ -346,9 +346,9 @@ pub use types::{/* utility functions */ from_redis_value, /* error kinds */ Erro
                 NumericBehavior, /* error and result types */ RedisError, RedisResult,
                 ToRedisArgs, /* low level values */ Value, RedisFuture};
 
-pub use connection::async;
-
 mod macros;
+
+pub mod async;
 
 mod parser;
 mod client;
