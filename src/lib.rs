@@ -341,10 +341,30 @@ pub use connection::{parse_redis_url, transaction, Connection, ConnectionAddr, C
 pub use cmd::{cmd, pack_command, pipe, Cmd, Iter, Pipeline};
 pub use commands::{Commands, PipelineCommands};
 
-pub use types::{/* utility functions */ from_redis_value, /* error kinds */ ErrorKind,
-                /* conversion traits */ FromRedisValue, /* utility types */ InfoDict,
-                NumericBehavior, /* error and result types */ RedisError, RedisResult,
-                ToRedisArgs, /* low level values */ Value, RedisFuture};
+#[cfg_attr(rustfmt, rustfmt_skip)]
+pub use types::{
+    /* low level values */
+    Value,
+
+    /* error and result types */
+    RedisError,
+    RedisResult,
+    RedisFuture,
+
+    /* error kinds */
+    ErrorKind,
+
+    /* utility types */
+    InfoDict,
+    NumericBehavior,
+
+    /* conversion traits */
+    FromRedisValue,
+    ToRedisArgs,
+
+    /* utility functions */
+    from_redis_value,
+};
 
 mod macros;
 
