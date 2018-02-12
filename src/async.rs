@@ -1,6 +1,6 @@
 use std::fmt::Arguments;
 use std::io::{self, Read, Write, BufReader};
-use std::net::SocketAddr;
+use std::net::ToSocketAddrs;
 use std::mem;
 
 #[cfg(feature="with-unix-sockets")]
@@ -14,9 +14,7 @@ use futures::{future, Async, Future, Poll};
 use futures::future::Either;
 
 use cmd::cmd;
-use types::{ErrorKind, RedisFuture, Value};
-#[cfg(not(feature="with-unix-sockets"))]
-use types::RedisError;
+use types::{RedisError, ErrorKind, RedisFuture, Value};
 
 use connection::{ConnectionAddr, ConnectionInfo};
 
@@ -102,11 +100,16 @@ impl Connection {
 
 pub fn connect(connection_info: ConnectionInfo, handle: &reactor::Handle) -> RedisFuture<Connection> {
     let connection = match *connection_info.addr {
-        ConnectionAddr::Tcp(ref host, ref port) => {
-            let host: &str = &*host;
-            // FIXME remove unwrap, make host IpAddr before this point?
+        ConnectionAddr::Tcp(ref host, port) => {
+            let socket_addr = match (&host[..], port).to_socket_addrs() {
+                Ok(mut socket_addrs) => match socket_addrs.next() {
+                    Some(socket_addr) => socket_addr,
+                    None => return Box::new(future::err(RedisError::from((ErrorKind::InvalidClientConfig, "No address found for host")))),
+                },
+                Err(err) => return Box::new(future::err(err.into())),
+            };
             Either::A(
-                TcpStream::connect(&SocketAddr::new(host.parse().unwrap(), *port), handle)
+                TcpStream::connect(&socket_addr, handle)
                   .from_err()
                   .map(|con| ActualConnection::Tcp(BufReader::new(con)))
             )
