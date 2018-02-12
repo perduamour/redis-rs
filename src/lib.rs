@@ -301,6 +301,56 @@
 //! # Ok(()) }
 //! ```
 //!
+//! # Async
+//!
+//! In addition to the synchronous interface that's been explained above there also exists an
+//! asynchronous interface based on [`futures`][] and [`tokio`][].
+//!
+//! This interface exists under the `async` module and largely mirrors the synchronous with a few
+//! concessions to make it fit the constraints of `futures`.
+//!
+//! ```rust,no_run
+//! extern crate redis;
+//! extern crate futures;
+//! extern crate tokio_core;
+//!
+//! use tokio_core::reactor::Core;
+//! use futures::Future;
+//!
+//! # fn main() {
+//! let mut core = Core::new().unwrap();
+//! let client = redis::Client::open("redis://127.0.0.1/").unwrap();
+//! let connect = client.get_async_connection(&core.handle());
+//!
+//! core.run(connect.and_then(|con| {
+//!     redis::cmd("SET")
+//!         .arg("key1")
+//!         .arg(b"foo")
+//!         // `query_async` acts in the same way as `query` but requires the connection to be
+//!         // taken by value as the method returns a `Future` instead of `Result`.
+//!         // This connection will be returned after the future has been completed allowing it to
+//!         // be used again.
+//!         .query_async(con)
+//!         .and_then(|(con, ())| {
+//!             redis::cmd("SET").arg(&["key2", "bar"]).query_async(con)
+//!         })
+//!         .and_then(|(con, ())| {
+//!             redis::cmd("MGET")
+//!                 .arg(&["key1", "key2"])
+//!                 .query_async(con)
+//!                 .map(|t| t.1)
+//!         })
+//!         .then(|result| {
+//!             assert_eq!(result, Ok(("foo".to_string(), b"bar".to_vec())));
+//!             result
+//!         })
+//! })).unwrap();
+//! # }
+//! ```
+//!
+//! [`futures`]:https://crates.io/crates/futures
+//! [`tokio`]:https://tokio.rs
+//!
 //! ## Breaking Changes
 //!
 //! In Rust 0.5.0 the semi-internal `ConnectionInfo` struct had to be

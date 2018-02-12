@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
-extern crate rand; extern crate net2;
+extern crate net2;
+extern crate rand;
 extern crate tokio_core;
 use self::tokio_core::reactor;
 
@@ -27,7 +28,11 @@ pub struct RedisServer {
 
 impl ServerType {
     fn get_intended() -> ServerType {
-        match env::var("REDISRS_SERVER_TYPE").ok().as_ref().map(|x| &x[..]) {
+        match env::var("REDISRS_SERVER_TYPE")
+            .ok()
+            .as_ref()
+            .map(|x| &x[..])
+        {
             Some("tcp") => ServerType::Tcp,
             Some("unix") => ServerType::Unix,
             val => {
@@ -66,10 +71,7 @@ impl RedisServer {
             ServerType::Unix => {
                 let (a, b) = rand::random::<(u64, u64)>();
                 let path = format!("/tmp/redis-rs-test-{}-{}.sock", a, b);
-                cmd.arg("--port")
-                    .arg("0")
-                    .arg("--unixsocket")
-                    .arg(&path);
+                cmd.arg("--port").arg("0").arg("--unixsocket").arg(&path);
                 redis::ConnectionAddr::Unix(PathBuf::from(&path))
             }
         };
@@ -113,23 +115,20 @@ impl TestContext {
         let server = RedisServer::new();
 
         let client = redis::Client::open(redis::ConnectionInfo {
-                addr: Box::new(server.get_client_addr().clone()),
-                db: 0,
-                passwd: None,
-            })
-            .unwrap();
+            addr: Box::new(server.get_client_addr().clone()),
+            db: 0,
+            passwd: None,
+        }).unwrap();
         let con;
 
         let millisecond = Duration::from_millis(1);
         loop {
             match client.get_connection() {
-                Err(err) => {
-                    if err.is_connection_refusal() {
-                        sleep(millisecond);
-                    } else {
-                        panic!("Could not connect: {}", err);
-                    }
-                }
+                Err(err) => if err.is_connection_refusal() {
+                    sleep(millisecond);
+                } else {
+                    panic!("Could not connect: {}", err);
+                },
                 Ok(x) => {
                     con = x;
                     break;
@@ -148,7 +147,10 @@ impl TestContext {
         self.client.get_connection().unwrap()
     }
 
-    pub fn async_connection(&self, handle: &reactor::Handle) -> RedisFuture<redis::async::Connection> {
+    pub fn async_connection(
+        &self,
+        handle: &reactor::Handle,
+    ) -> RedisFuture<redis::async::Connection> {
         self.client.get_async_connection(handle)
     }
 
@@ -156,4 +158,3 @@ impl TestContext {
         self.client.get_pubsub().unwrap()
     }
 }
-
