@@ -2,8 +2,6 @@ use connection::{connect, connect_pubsub, Connection, ConnectionInfo, Connection
                  IntoConnectionInfo, PubSub};
 use types::{RedisResult, RedisFuture, Value};
 
-use tokio_core::reactor;
-
 
 /// The client type.
 #[derive(Debug, Clone)]
@@ -46,8 +44,8 @@ impl Client {
         Ok(try!(connect(&self.connection_info)))
     }
 
-    pub fn get_async_connection(&self, handle: &reactor::Handle) -> RedisFuture<::async::Connection> {
-        ::async::connect(self.connection_info.clone(), handle)
+    pub fn get_async_connection(&self) -> RedisFuture<::async::Connection> {
+        ::async::connect(self.connection_info.clone())
     }
 
     /// Returns a PubSub connection.  A pubsub connection can be used to

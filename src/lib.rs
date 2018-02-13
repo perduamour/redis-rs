@@ -312,17 +312,15 @@
 //! ```rust,no_run
 //! extern crate redis;
 //! extern crate futures;
-//! extern crate tokio_core;
+//! extern crate tokio;
 //!
-//! use tokio_core::reactor::Core;
 //! use futures::Future;
 //!
 //! # fn main() {
-//! let mut core = Core::new().unwrap();
 //! let client = redis::Client::open("redis://127.0.0.1/").unwrap();
-//! let connect = client.get_async_connection(&core.handle());
+//! let connect = client.get_async_connection();
 //!
-//! core.run(connect.and_then(|con| {
+//! connect.and_then(|con| {
 //!     redis::cmd("SET")
 //!         .arg("key1")
 //!         .arg(b"foo")
@@ -344,7 +342,7 @@
 //!             assert_eq!(result, Ok(("foo".to_string(), b"bar".to_vec())));
 //!             result
 //!         })
-//! })).unwrap();
+//! }).wait().unwrap();
 //! # }
 //! ```
 //!
@@ -367,7 +365,7 @@ extern crate url;
 
 #[macro_use]
 extern crate futures;
-extern crate tokio_core;
+extern crate tokio;
 #[macro_use]
 extern crate tokio_io;
 

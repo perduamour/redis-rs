@@ -2,8 +2,7 @@
 
 extern crate net2;
 extern crate rand;
-extern crate tokio_core;
-use self::tokio_core::reactor;
+extern crate tokio;
 
 use redis::{self, RedisFuture};
 
@@ -147,11 +146,8 @@ impl TestContext {
         self.client.get_connection().unwrap()
     }
 
-    pub fn async_connection(
-        &self,
-        handle: &reactor::Handle,
-    ) -> RedisFuture<redis::async::Connection> {
-        self.client.get_async_connection(handle)
+    pub fn async_connection(&self) -> RedisFuture<redis::async::Connection> {
+        self.client.get_async_connection()
     }
 
     pub fn pubsub(&self) -> redis::PubSub {

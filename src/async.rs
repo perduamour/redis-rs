@@ -7,8 +7,7 @@ use std::mem;
 use tokio_uds::UnixStream;
 
 use tokio_io::{self, AsyncWrite};
-use tokio_core::reactor;
-use tokio_core::net::TcpStream;
+use tokio::net::TcpStream;
 
 use futures::{future, Async, Future, Poll};
 use futures::future::Either;
@@ -98,7 +97,7 @@ impl Connection {
 }
 
 
-pub fn connect(connection_info: ConnectionInfo, handle: &reactor::Handle) -> RedisFuture<Connection> {
+pub fn connect(connection_info: ConnectionInfo) -> RedisFuture<Connection> {
     let connection = match *connection_info.addr {
         ConnectionAddr::Tcp(ref host, port) => {
             let socket_addr = match (&host[..], port).to_socket_addrs() {
@@ -109,14 +108,14 @@ pub fn connect(connection_info: ConnectionInfo, handle: &reactor::Handle) -> Red
                 Err(err) => return Box::new(future::err(err.into())),
             };
             Either::A(
-                TcpStream::connect(&socket_addr, handle)
+                TcpStream::connect(&socket_addr)
                   .from_err()
                   .map(|con| ActualConnection::Tcp(BufReader::new(con)))
             )
         }
         #[cfg(feature="with-unix-sockets")]
         ConnectionAddr::Unix(ref path) => {
-            let result = UnixStream::connect(path, handle).map(|stream| {
+            let result = UnixStream::connect(path).map(|stream| {
                 ActualConnection::Unix(BufReader::new(stream))
             });
             Either::B(future::result(result))

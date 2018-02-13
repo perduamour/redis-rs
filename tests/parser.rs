@@ -4,14 +4,15 @@ extern crate redis;
 extern crate quickcheck;
 extern crate partial_io;
 extern crate futures;
-extern crate tokio_core;
+extern crate tokio;
 
 use std::io::{self, BufReader};
 
 use partial_io::{GenWouldBlock, PartialAsyncRead, PartialWithErrors};
-use tokio_core::reactor;
 
 use redis::Value; 
+
+use futures::Future;
 
 #[derive(Clone, Debug)]
 struct ArbitraryValue(Value);
@@ -91,10 +92,10 @@ quickcheck!{
 
         let reader = io::Cursor::new(&encoded_input[..]);
         let partial_reader = PartialAsyncRead::new(reader, seq);
-        let mut core = reactor::Core::new().unwrap();
 
-        let result = core.run(redis::parse_async(BufReader::new(partial_reader)))
-            .map(|t| t.1);
+        let result = redis::parse_async(BufReader::new(partial_reader))
+            .map(|t| t.1)
+            .wait();
 
         assert!(result.as_ref().is_ok(), "{}", result.unwrap_err());
         assert_eq!(
