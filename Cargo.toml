@@ -36,3 +36,6 @@ bencher = "0.1"
 name = "bench_basic"
 harness = false
 
+[profile.bench]
+debug = true
+
