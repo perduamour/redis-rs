@@ -1,4 +1,6 @@
-use types::{ToRedisArgs, FromRedisValue, Value, RedisResult, ErrorKind, from_redis_value};
+use std::io;
+
+use types::{from_redis_value, ErrorKind, FromRedisValue, RedisResult, ToRedisArgs, Value};
 use connection::ConnectionLike;
 
 #[derive(Clone)]
@@ -7,7 +9,6 @@ enum Arg<'a> {
     Cursor,
     Borrowed(&'a [u8]),
 }
-
 
 /// Represents redis commands.
 #[derive(Clone)]
@@ -51,14 +52,13 @@ impl<'a, T: FromRedisValue> Iterator for Iter<'a, T> {
                 return None;
             }
 
-            let pcmd = unwrap_or!(self.cmd.get_packed_command_with_cursor(self.cursor),
-                                  return None);
-            let rv = unwrap_or!(self.con
-                                    .req_packed_command(&pcmd)
-                                    .ok(),
-                                return None);
-            let (cur, mut batch): (u64, Vec<T>) = unwrap_or!(from_redis_value(&rv).ok(),
-                                                             return None);
+            let pcmd = unwrap_or!(
+                self.cmd.get_packed_command_with_cursor(self.cursor),
+                return None
+            );
+            let rv = unwrap_or!(self.con.req_packed_command(&pcmd).ok(), return None);
+            let (cur, mut batch): (u64, Vec<T>) =
+                unwrap_or!(from_redis_value(&rv).ok(), return None);
             batch.reverse();
 
             self.cursor = cur;
@@ -93,53 +93,46 @@ fn bulklen(len: usize) -> usize {
     return 1 + countdigits(len) + 2 + len + 2;
 }
 
-fn encode_command(args: &[Arg], cursor: u64) -> Vec<u8> {
-    use std::io::Write;
-
-    let mut totlen = 1 + countdigits(args.len()) + 2;
-    for item in args {
-        totlen += bulklen(match *item {
-            Arg::Cursor => countdigits(cursor as usize),
-            Arg::Simple(ref val) => val.len(),
-            Arg::Borrowed(ptr) => ptr.len(),
-        });
-    }
-
-    let mut cmd = Vec::with_capacity(totlen);
-    write!(cmd, "*{}\r\n", args.len()).unwrap();
+fn encode_command<W>(cmd: &mut W, args: &[Arg], cursor: u64) -> io::Result<()>
+where
+    W: ?Sized + io::Write,
+{
+    write!(cmd, "*{}\r\n", args.len())?;
 
     {
-        let mut encode = |item: &[u8]| {
-            write!(cmd, "${}\r\n", item.len()).unwrap();
-            cmd.extend(item.iter());
-            cmd.push('\r' as u8);
-            cmd.push('\n' as u8);
+        let mut encode = |item: &[u8]| -> io::Result<()> {
+            write!(cmd, "${}\r\n", item.len())?;
+            cmd.write_all(item)?;
+            cmd.write_all(b"\r\n")?;
+            Ok(())
         };
 
         for item in args.iter() {
             match *item {
-                Arg::Cursor => encode(cursor.to_string().as_bytes()),
-                Arg::Simple(ref val) => encode(val),
-                Arg::Borrowed(ptr) => encode(ptr),
+                Arg::Cursor => encode(cursor.to_string().as_bytes())?,
+                Arg::Simple(ref val) => encode(val)?,
+                Arg::Borrowed(ptr) => encode(ptr)?,
             }
         }
     }
 
-    cmd
+    Ok(())
 }
 
-fn encode_pipeline(cmds: &[Cmd], atomic: bool) -> Vec<u8> {
-    let mut rv = vec![];
+fn encode_pipeline<W>(out: &mut W, cmds: &[Cmd], atomic: bool) -> io::Result<()>
+where
+    W: ?Sized + io::Write,
+{
     if atomic {
-        rv.extend(cmd("MULTI").get_packed_command().into_iter());
+        cmd("MULTI").get_packed_command(out)?;
     }
     for cmd in cmds.iter() {
-        rv.extend(cmd.get_packed_command().into_iter());
+        cmd.get_packed_command(out)?;
     }
     if atomic {
-        rv.extend(cmd("EXEC").get_packed_command().into_iter());
+        cmd("EXEC").get_packed_command(out)?;
     }
-    rv
+    Ok(())
 }
 
 /// A command acts as a builder interface to creating encoded redis
@@ -226,8 +219,11 @@ impl Cmd {
 
     /// Returns the packed command as a byte vector.
     #[inline]
-    pub fn get_packed_command(&self) -> Vec<u8> {
-        encode_command(&self.args, self.cursor.unwrap_or(0))
+    pub fn get_packed_command<W>(&self, out: &mut W) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        encode_command(out, &self.args, self.cursor.unwrap_or(0))
     }
 
     /// Like `get_packed_command` but replaces the cursor with the
@@ -238,7 +234,9 @@ impl Cmd {
         if !self.in_scan_mode() {
             None
         } else {
-            Some(encode_command(&self.args, cursor))
+            let mut out = Vec::new();
+            encode_command(&mut out, &self.args, cursor).unwrap();
+            Some(out)
         }
     }
 
@@ -253,7 +251,8 @@ impl Cmd {
     /// you can retrieve data.
     #[inline]
     pub fn query<T: FromRedisValue>(&self, con: &ConnectionLike) -> RedisResult<T> {
-        let pcmd = self.get_packed_command();
+        let mut pcmd = Vec::new();
+        self.get_packed_command(&mut pcmd)?;
         match con.req_packed_command(&pcmd) {
             Ok(val) => from_redis_value(&val),
             Err(e) => Err(e),
@@ -276,7 +275,8 @@ impl Cmd {
     /// tuple of cursor and list).
     #[inline]
     pub fn iter<'a, T: FromRedisValue>(&self, con: &'a ConnectionLike) -> RedisResult<Iter<'a, T>> {
-        let pcmd = self.get_packed_command();
+        let mut pcmd = Vec::new();
+        self.get_packed_command(&mut pcmd)?;
         let rv = try!(con.req_packed_command(&pcmd));
         let mut batch: Vec<T>;
         let mut cursor = 0;
@@ -315,7 +315,6 @@ impl Cmd {
         let _: () = self.query(con).unwrap();
     }
 }
-
 
 /// A pipeline allows you to send multiple commands in one go to the
 /// redis server.  API wise it's very similar to just using a command
@@ -431,19 +430,26 @@ impl Pipeline {
     }
 
     fn execute_pipelined(&self, con: &ConnectionLike) -> RedisResult<Value> {
+        let mut command = Vec::new();
+        encode_pipeline(&mut command, &self.commands, false)?;
         Ok(self.make_pipeline_results(try!(con.req_packed_commands(
-            &encode_pipeline(&self.commands, false),
-            0, self.commands.len()))))
+            &command,
+            0,
+            self.commands.len()
+        ))))
     }
 
     fn execute_transaction(&self, con: &ConnectionLike) -> RedisResult<Value> {
-        let mut resp = try!(con.req_packed_commands(&encode_pipeline(&self.commands, true),
-                                                    self.commands.len() + 1,
-                                                    1));
+        let mut command = Vec::new();
+        encode_pipeline(&mut command, &self.commands, true)?;
+        let mut resp = try!(con.req_packed_commands(&command, self.commands.len() + 1, 1));
         match resp.pop() {
             Some(Value::Nil) => Ok(Value::Nil),
             Some(Value::Bulk(items)) => Ok(self.make_pipeline_results(items)),
-            _ => fail!((ErrorKind::ResponseError, "Invalid response when parsing multi response")),
+            _ => fail!((
+                ErrorKind::ResponseError,
+                "Invalid response when parsing multi response"
+            )),
         }
     }
 
@@ -462,13 +468,15 @@ impl Pipeline {
     /// ```
     #[inline]
     pub fn query<T: FromRedisValue>(&self, con: &ConnectionLike) -> RedisResult<T> {
-        from_redis_value(&(if self.commands.len() == 0 {
-            Value::Bulk(vec![])
-        } else if self.transaction_mode {
-            try!(self.execute_transaction(con))
-        } else {
-            try!(self.execute_pipelined(con))
-        }))
+        from_redis_value(
+            &(if self.commands.len() == 0 {
+                Value::Bulk(vec![])
+            } else if self.transaction_mode {
+                try!(self.execute_transaction(con))
+            } else {
+                try!(self.execute_pipelined(con))
+            }),
+        )
     }
 
     /// This is a shortcut to `query()` that does not return a value and
@@ -520,7 +528,13 @@ pub fn cmd<'a>(name: &'a str) -> Cmd {
 /// assert_eq!(cmd, b"*3\r\n$3\r\nSET\r\n$6\r\nmy_key\r\n$2\r\n42\r\n".to_vec());
 /// ```
 pub fn pack_command(args: &[Vec<u8>]) -> Vec<u8> {
-    encode_command(&args.iter().map(|x| Arg::Borrowed(x)).collect::<Vec<_>>(), 0)
+    let mut cmd = Vec::new();
+    encode_command(
+        &mut cmd,
+        &args.iter().map(|x| Arg::Borrowed(x)).collect::<Vec<_>>(),
+        0,
+    ).unwrap();
+    cmd
 }
 
 /// Shortcut for creating a new pipeline.
