@@ -1,5 +1,5 @@
-use types::{ToRedisArgs, FromRedisValue, Value, RedisResult, ErrorKind, from_redis_value};
 use connection::ConnectionLike;
+use types::{from_redis_value, ErrorKind, FromRedisValue, RedisResult, ToRedisArgs, Value};
 
 #[derive(Clone)]
 enum Arg<'a> {
@@ -7,7 +7,6 @@ enum Arg<'a> {
     Cursor,
     Borrowed(&'a [u8]),
 }
-
 
 /// Represents redis commands.
 #[derive(Clone)]
@@ -51,14 +50,13 @@ impl<'a, T: FromRedisValue> Iterator for Iter<'a, T> {
                 return None;
             }
 
-            let pcmd = unwrap_or!(self.cmd.get_packed_command_with_cursor(self.cursor),
-                                  return None);
-            let rv = unwrap_or!(self.con
-                                    .req_packed_command(&pcmd)
-                                    .ok(),
-                                return None);
-            let (cur, mut batch): (u64, Vec<T>) = unwrap_or!(from_redis_value(&rv).ok(),
-                                                             return None);
+            let pcmd = unwrap_or!(
+                self.cmd.get_packed_command_with_cursor(self.cursor),
+                return None
+            );
+            let rv = unwrap_or!(self.con.req_packed_command(&pcmd).ok(), return None);
+            let (cur, mut batch): (u64, Vec<T>) =
+                unwrap_or!(from_redis_value(&rv).ok(), return None);
             batch.reverse();
 
             self.cursor = cur;
@@ -316,7 +314,6 @@ impl Cmd {
     }
 }
 
-
 /// A pipeline allows you to send multiple commands in one go to the
 /// redis server.  API wise it's very similar to just using a command
 /// but it allows multiple commands to be chained and some features such
@@ -433,17 +430,24 @@ impl Pipeline {
     fn execute_pipelined(&self, con: &ConnectionLike) -> RedisResult<Value> {
         Ok(self.make_pipeline_results(try!(con.req_packed_commands(
             &encode_pipeline(&self.commands, false),
-            0, self.commands.len()))))
+            0,
+            self.commands.len()
+        ))))
     }
 
     fn execute_transaction(&self, con: &ConnectionLike) -> RedisResult<Value> {
-        let mut resp = try!(con.req_packed_commands(&encode_pipeline(&self.commands, true),
-                                                    self.commands.len() + 1,
-                                                    1));
+        let mut resp = try!(con.req_packed_commands(
+            &encode_pipeline(&self.commands, true),
+            self.commands.len() + 1,
+            1
+        ));
         match resp.pop() {
             Some(Value::Nil) => Ok(Value::Nil),
             Some(Value::Bulk(items)) => Ok(self.make_pipeline_results(items)),
-            _ => fail!((ErrorKind::ResponseError, "Invalid response when parsing multi response")),
+            _ => fail!((
+                ErrorKind::ResponseError,
+                "Invalid response when parsing multi response"
+            )),
         }
     }
 
@@ -462,13 +466,15 @@ impl Pipeline {
     /// ```
     #[inline]
     pub fn query<T: FromRedisValue>(&self, con: &ConnectionLike) -> RedisResult<T> {
-        from_redis_value(&(if self.commands.len() == 0 {
-            Value::Bulk(vec![])
-        } else if self.transaction_mode {
-            try!(self.execute_transaction(con))
-        } else {
-            try!(self.execute_pipelined(con))
-        }))
+        from_redis_value(
+            &(if self.commands.len() == 0 {
+                Value::Bulk(vec![])
+            } else if self.transaction_mode {
+                try!(self.execute_transaction(con))
+            } else {
+                try!(self.execute_pipelined(con))
+            }),
+        )
     }
 
     /// This is a shortcut to `query()` that does not return a value and
@@ -520,7 +526,10 @@ pub fn cmd<'a>(name: &'a str) -> Cmd {
 /// assert_eq!(cmd, b"*3\r\n$3\r\nSET\r\n$6\r\nmy_key\r\n$2\r\n42\r\n".to_vec());
 /// ```
 pub fn pack_command(args: &[Vec<u8>]) -> Vec<u8> {
-    encode_command(&args.iter().map(|x| Arg::Borrowed(x)).collect::<Vec<_>>(), 0)
+    encode_command(
+        &args.iter().map(|x| Arg::Borrowed(x)).collect::<Vec<_>>(),
+        0,
+    )
 }
 
 /// Shortcut for creating a new pipeline.

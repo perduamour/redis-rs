@@ -93,12 +93,14 @@ fn bench_encode_pipeline_nested(b: &mut Bencher) {
         let mut pipe = redis::pipe();
 
         for _ in 0..200 {
-            pipe.set("foo", ("bar", 123, b"1231279712", &["test", "test", "test"][..])).ignore();
+            pipe.set(
+                "foo",
+                ("bar", 123, b"1231279712", &["test", "test", "test"][..]),
+            ).ignore();
         }
         pipe
     });
 }
-
 
 benchmark_group!(
     bench,

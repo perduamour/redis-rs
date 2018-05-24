@@ -1,7 +1,6 @@
-use std::io::{Read, BufReader};
+use std::io::{BufReader, Read};
 
-use types::{RedisResult, Value, ErrorKind, make_extension_error};
-
+use types::{make_extension_error, ErrorKind, RedisResult, Value};
 
 /// The internal redis response parser.
 pub struct Parser<T> {
@@ -34,7 +33,10 @@ impl<'a, T: Read> Parser<T> {
             '$' => self.parse_data(),
             '*' => self.parse_bulk(),
             '-' => self.parse_error(),
-            _ => fail!((ErrorKind::ResponseError, "Invalid response when parsing value")),
+            _ => fail!((
+                ErrorKind::ResponseError,
+                "Invalid response when parsing value"
+            )),
         }
     }
 
@@ -80,7 +82,10 @@ impl<'a, T: Read> Parser<T> {
 
     fn read_string_line(&mut self) -> RedisResult<String> {
         match String::from_utf8(try!(self.read_line())) {
-            Err(_) => fail!((ErrorKind::ResponseError, "Expected valid string, got garbage")),
+            Err(_) => fail!((
+                ErrorKind::ResponseError,
+                "Expected valid string, got garbage"
+            )),
             Ok(value) => Ok(value),
         }
     }
@@ -178,7 +183,6 @@ impl<'a, T: Read> Parser<T> {
         }
     }
 }
-
 
 /// Parses bytes into a redis value.
 ///

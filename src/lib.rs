@@ -1,3 +1,4 @@
+#![cfg_attr(rustfmt, rustfmt_skip)]
 //! redis-rs is a rust implementation of a Redis client library.  It exposes
 //! a general purpose interface to Redis and also provides specific helpers for
 //! commonly used functionality.
@@ -332,6 +333,7 @@ pub use connection::{Connection, ConnectionLike, ConnectionInfo, ConnectionAddr,
 pub use cmd::{cmd, Cmd, pipe, Pipeline, Iter, pack_command};
 pub use commands::{Commands, PipelineCommands, PubSubCommands, ControlFlow};
 
+#[cfg_attr(rustfmt, rustfmt_skip)]
 pub use types::{
     /* low level values */
     Value,
