@@ -53,17 +53,26 @@ where
     }
 }
 
-fn line<'a, I>() -> impl combine::Parser<Input = I, Output = &'a str, PartialState = impl Send + Default>
-where
+// Workaround for
+trait PartialState: Send + Default + 'static {}
+impl<T> PartialState for T where T: Send + Default + 'static {}
+
+
+parser! {
+    type PartialState = AnySendPartialState;
+
+fn line['a, I]()(I) -> &'a str
+where [
     I: RangeStream<Item = u8, Range = &'a [u8]>,
-    I::Error: combine::ParseError<I::Item, I::Range, I::Position>,
+]
 {
     recognize(take_until_range(&b"\r\n"[..]).with(crlf())).and_then(|line: &[u8]| {
         str::from_utf8(&line[..line.len() - 2]).map_err(StreamErrorFor::<I>::other)
     })
 }
+}
 
-fn status<'a, I>() -> impl combine::Parser<Input = I, Output = Value, PartialState = impl Send + Default>
+fn status<'a, I>() -> impl combine::Parser<Input = I, Output = Value, PartialState = impl PartialState> + 'a
 where
     I: RangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: combine::ParseError<I::Item, I::Range, I::Position>,
@@ -77,9 +86,9 @@ where
     })
 }
 
-fn int<'a, I>() -> impl combine::Parser<Input = I, Output = i64, PartialState = impl Send + Default>
+fn int<'a, I>() -> impl combine::Parser<Input = I, Output = i64, PartialState = impl PartialState>
 where
-    I: RangeStream<Item = u8, Range = &'a [u8]> + 'a,
+    I: RangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: combine::ParseError<I::Item, I::Range, I::Position>,
 {
     line().and_then(|line| match line.trim().parse::<i64>() {
@@ -90,16 +99,17 @@ where
     })
 }
 
-fn data<'a, I>() -> impl combine::Parser<Input = I, Output = Value, PartialState = impl Send + Default>
+fn data<'a, I>() -> impl combine::Parser<Input = I, Output = Value, PartialState = impl PartialState>
 where
     I: RangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: combine::ParseError<I::Item, I::Range, I::Position>,
 {
     int().then_partial(move |size| {
-        if *size < 0 {
+        let size = *size;
+        if size < 0 {
             combine::value(Value::Nil).left()
         } else {
-            take(*size as usize)
+            take(size as usize)
                 .map(|v: &[u8]| Value::Data(v.to_vec()))
                 .skip(crlf())
                 .right()
@@ -107,7 +117,7 @@ where
     })
 }
 
-fn error<'a, I>() -> impl combine::Parser<Input = I, Output = RedisError, PartialState = impl Send + Default>
+fn error<'a, I>() -> impl combine::Parser<Input = I, Output = RedisError, PartialState = impl PartialState>
 where
     I: RangeStream<Item = u8, Range = &'a [u8]>,
     I::Error: combine::ParseError<I::Item, I::Range, I::Position>,
@@ -132,7 +142,7 @@ where
 parser! {
     type PartialState = AnySendPartialState;
     fn value['a, I]()(I) -> RedisResult<Value>
-        where [I: RangeStream<Item = u8, Range = &'a [u8]> + 'a ]
+        where [I: RangeStream<Item = u8, Range = &'a [u8]> ]
     {
         let bulk = || {
             int().then_partial(|&mut length| {
