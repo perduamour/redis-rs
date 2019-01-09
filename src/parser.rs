@@ -5,11 +5,11 @@ use types::{make_extension_error, ErrorKind, RedisError, RedisResult, Value};
 
 use bytes::BytesMut;
 use futures::{Async, Future, Poll};
-use tokio_io::AsyncRead;
 use tokio_io::codec::{Decoder, Encoder};
+use tokio_io::AsyncRead;
 
 use combine;
-use combine::byte::{byte, crlf, newline};
+use combine::byte::{byte, crlf};
 use combine::combinator::{any_send_partial_state, AnySendPartialState};
 #[allow(unused_imports)] // See https://github.com/rust-lang/rust/issues/43970
 use combine::error::StreamError;
@@ -53,12 +53,12 @@ where
     }
 }
 
-parser!{
+parser! {
     type PartialState = AnySendPartialState;
     fn value['a, I]()(I) -> RedisResult<Value>
         where [I: RangeStream<Item = u8, Range = &'a [u8]> ]
     {
-        let end_of_line: fn () -> _ = || crlf().or(newline());
+        let end_of_line: fn () -> _ = || crlf();
         let line = || recognize(take_until_range(&b"\r\n"[..]).with(end_of_line()))
             .and_then(|line: &[u8]| {
                 str::from_utf8(line)
@@ -162,7 +162,8 @@ impl Decoder for ValueCodec {
             match combine::stream::decode(value(), stream, &mut self.state) {
                 Ok(x) => x,
                 Err(err) => {
-                    let err = err.map_position(|pos| pos.translate_position(buffer))
+                    let err = err
+                        .map_position(|pos| pos.translate_position(buffer))
                         .map_range(|range| format!("{:?}", range))
                         .to_string();
                     return Err(RedisError::from((
@@ -220,7 +221,8 @@ where
                 match combine::stream::decode(value(), stream, &mut self.state) {
                     Ok(x) => x,
                     Err(err) => {
-                        let err = err.map_position(|pos| pos.translate_position(buffer))
+                        let err = err
+                            .map_position(|pos| pos.translate_position(buffer))
                             .map_range(|range| format!("{:?}", range))
                             .to_string();
                         return Err(RedisError::from((
