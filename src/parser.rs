@@ -61,8 +61,7 @@ parser! {
         let end_of_line: fn () -> _ = || crlf();
         let line = || recognize(take_until_range(&b"\r\n"[..]).with(end_of_line()))
             .and_then(|line: &[u8]| {
-                str::from_utf8(line)
-                    .map(|line| line.trim_right_matches(|c: char| c == '\r' || c == '\n'))
+                str::from_utf8(&line[..line.len() - 2])
                     .map_err(StreamErrorFor::<I>::other)
             });
 
