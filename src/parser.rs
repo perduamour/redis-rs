@@ -8,7 +8,6 @@ use futures::{Async, Future, Poll};
 use tokio_io::codec::{Decoder, Encoder};
 use tokio_io::AsyncRead;
 
-use combine;
 use combine::byte::{byte, crlf};
 use combine::combinator::{any_send_partial_state, AnySendPartialState};
 #[allow(unused_imports)] // See https://github.com/rust-lang/rust/issues/43970
@@ -16,6 +15,7 @@ use combine::error::StreamError;
 use combine::parser::choice::choice;
 use combine::range::{recognize, take, take_until_range};
 use combine::stream::{RangeStream, StreamErrorFor};
+use combine::{self, Parser as CombineParser};
 
 struct ResultExtend<T, E>(Result<T, E>);
 
@@ -53,44 +53,87 @@ where
     }
 }
 
+fn line<'a, I>() -> impl combine::Parser<Input = I, Output = &'a str, PartialState = impl Send + Default>
+where
+    I: RangeStream<Item = u8, Range = &'a [u8]>,
+    I::Error: combine::ParseError<I::Item, I::Range, I::Position>,
+{
+    recognize(take_until_range(&b"\r\n"[..]).with(crlf())).and_then(|line: &[u8]| {
+        str::from_utf8(&line[..line.len() - 2]).map_err(StreamErrorFor::<I>::other)
+    })
+}
+
+fn status<'a, I>() -> impl combine::Parser<Input = I, Output = Value, PartialState = impl Send + Default>
+where
+    I: RangeStream<Item = u8, Range = &'a [u8]>,
+    I::Error: combine::ParseError<I::Item, I::Range, I::Position>,
+{
+    line().map(|line| {
+        if line == "OK" {
+            Value::Okay
+        } else {
+            Value::Status(line.into())
+        }
+    })
+}
+
+fn int<'a, I>() -> impl combine::Parser<Input = I, Output = i64, PartialState = impl Send + Default>
+where
+    I: RangeStream<Item = u8, Range = &'a [u8]> + 'a,
+    I::Error: combine::ParseError<I::Item, I::Range, I::Position>,
+{
+    line().and_then(|line| match line.trim().parse::<i64>() {
+        Err(_) => Err(StreamErrorFor::<I>::message_static_message(
+            "Expected integer, got garbage",
+        )),
+        Ok(value) => Ok(value),
+    })
+}
+
+fn data<'a, I>() -> impl combine::Parser<Input = I, Output = Value, PartialState = impl Send + Default>
+where
+    I: RangeStream<Item = u8, Range = &'a [u8]>,
+    I::Error: combine::ParseError<I::Item, I::Range, I::Position>,
+{
+    int().then_partial(move |size| {
+        if *size < 0 {
+            combine::value(Value::Nil).left()
+        } else {
+            take(*size as usize)
+                .map(|v: &[u8]| Value::Data(v.to_vec()))
+                .skip(crlf())
+                .right()
+        }
+    })
+}
+
+fn error<'a, I>() -> impl combine::Parser<Input = I, Output = RedisError, PartialState = impl Send + Default>
+where
+    I: RangeStream<Item = u8, Range = &'a [u8]>,
+    I::Error: combine::ParseError<I::Item, I::Range, I::Position>,
+{
+    line().map(|line: &str| {
+        let desc = "An error was signalled by the server";
+        let mut pieces = line.splitn(2, ' ');
+        let kind = match pieces.next().unwrap() {
+            "ERR" => ErrorKind::ResponseError,
+            "EXECABORT" => ErrorKind::ExecAbortError,
+            "LOADING" => ErrorKind::BusyLoadingError,
+            "NOSCRIPT" => ErrorKind::NoScriptError,
+            code => return make_extension_error(code, pieces.next()),
+        };
+        match pieces.next() {
+            Some(detail) => RedisError::from((kind, desc, detail.to_string())),
+            None => RedisError::from((kind, desc)),
+        }
+    })
+}
+
 parser! {
     type PartialState = AnySendPartialState;
     fn value['a, I]()(I) -> RedisResult<Value>
-        where [I: RangeStream<Item = u8, Range = &'a [u8]> ]
+        where [I: RangeStream<Item = u8, Range = &'a [u8]> + 'a ]
     {
-        let end_of_line: fn () -> _ = || crlf();
-        let line = || recognize(take_until_range(&b"\r\n"[..]).with(end_of_line()))
-            .and_then(|line: &[u8]| {
-                str::from_utf8(&line[..line.len() - 2])
-                    .map_err(StreamErrorFor::<I>::other)
-            });
-
-        let status = || line().map(|line| {
-            if line == "OK" {
-                Value::Okay
-            } else {
-                Value::Status(line.into())
-            }
-        });
-
-        let int = || line().and_then(|line| {
-            match line.trim().parse::<i64>() {
-                Err(_) => Err(StreamErrorFor::<I>::message_static_message("Expected integer, got garbage")),
-                Ok(value) => Ok(value),
-            }
-        });
-
-        let data = || int().then_partial(move |size| {
-            if *size < 0 {
-                combine::value(Value::Nil).left()
-            } else {
-                take(*size as usize)
-                    .map(|bs: &[u8]| Value::Data(bs.to_vec()))
-                    .skip(end_of_line())
-                    .right()
-            }
-        });
-
         let bulk = || {
             int().then_partial(|&mut length| {
                 if length < 0 {
@@ -104,27 +147,6 @@ parser! {
                         .right()
                 }
             })
-        };
-
-        let error = || {
-            line()
-                .map(|line: &str| {
-                    let desc = "An error was signalled by the server";
-                    let mut pieces = line.splitn(2, ' ');
-                    let kind = match pieces.next().unwrap() {
-                        "ERR" => ErrorKind::ResponseError,
-                        "EXECABORT" => ErrorKind::ExecAbortError,
-                        "LOADING" => ErrorKind::BusyLoadingError,
-                        "NOSCRIPT" => ErrorKind::NoScriptError,
-                        code => {
-                            return make_extension_error(code, pieces.next())
-                        }
-                    };
-                    match pieces.next() {
-                        Some(detail) => RedisError::from((kind, desc, detail.to_string())),
-                        None => RedisError::from((kind, desc)),
-                    }
-                })
         };
 
         any_send_partial_state(choice((
