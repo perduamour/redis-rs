@@ -55,7 +55,6 @@ where
 }
 
 trait RedisParser {
-    type BulkParser: RedisParser;
     fn nil(&mut self) -> RedisResult<()>;
     fn data(&mut self, data: &[u8]) -> RedisResult<()>;
     fn status(&mut self, msg: & str) -> RedisResult<()>;
@@ -94,7 +93,6 @@ impl ValueParser {
 }
 
 impl RedisParser for ValueParser {
-    type BulkParser = Self;
     fn nil(&mut  self) -> RedisResult<()> {
         self.value(Value::Nil)
     }
@@ -156,7 +154,7 @@ fn with_state[S, R, I, F](f: F)(StateStream<I, S>) -> R
 
 parser! {
     type PartialState = AnySendPartialState;
-    fn value['a, 'b, I]()(StateStream<I, &'b mut ValueParser>) -> RedisResult<()>
+    fn value['a, 'b, I]()(StateStream<I, &'b mut RedisParser>) -> RedisResult<()>
         where [I: RangeStream<Item = u8, Range = &'a [u8]> ]
     {
         let end_of_line: fn () -> _ = || crlf();
@@ -166,7 +164,7 @@ parser! {
                     .map_err(StreamErrorFor::<I>::other)
             });
 
-        let status = || line().map_input(move |line, input: &mut StateStream<_, &mut ValueParser>| {
+        let status = || line().map_input(move |line, input: &mut StateStream<_, &mut RedisParser>| {
             input.state.status(line)
         });
 
@@ -179,11 +177,11 @@ parser! {
 
         let data = || int().then_partial(move |&mut size| {
             if size < 0 {
-                with_state(move |state: &mut &mut ValueParser| state.nil())
+                with_state(move |state: &mut &mut RedisParser| state.nil())
                     .left()
             } else {
                 take(size as usize)
-                    .map_input(move |bs: &[u8], input: &mut StateStream<_, &mut ValueParser>| 
+                    .map_input(move |bs: &[u8], input: &mut StateStream<_, &mut RedisParser>| 
                         input.state.data(bs)
                     )
                     .skip(end_of_line())
@@ -194,15 +192,15 @@ parser! {
         let bulk = || {
             int().then_partial(move |&mut length| {
                 if length < 0 {
-                    with_state(move |state: &mut &mut ValueParser| 
+                    with_state(move |state: &mut &mut RedisParser| 
                         state.nil()
                     )
                         .left()
                 } else {
                     let length = length as usize;
-                    with_state(move |state: &mut &mut ValueParser| state.bulk_start(length))
+                    with_state(move |state: &mut &mut RedisParser| state.bulk_start(length))
                         .with(combine::count_min_max(length, length, value()))
-                        .skip(with_state(|state: &mut &mut ValueParser| state.bulk_end()))
+                        .skip(with_state(|state: &mut &mut RedisParser| state.bulk_end()))
                         .map(|result: ResultExtend<(), _>| {
                             result.0
                         })
@@ -236,7 +234,7 @@ parser! {
            byte(b'+').with(status()),
            byte(b':').with(int().then_partial(move |&mut i| {
 
-                with_state(move |state: &mut &mut ValueParser| 
+                with_state(move |state: &mut &mut RedisParser| 
                     state.int(i)
                 )
            })),
@@ -271,7 +269,7 @@ impl Decoder for ValueCodec {
             let result = {
                 let stream = StateStream {
                     stream: combine::easy::Stream(combine::stream::PartialStream(buffer)),
-                    state: &mut self.value_state
+                    state: &mut self.value_state as &mut RedisParser
                 };
                 combine::stream::decode(value(), stream, &mut self.state)
             };
@@ -340,7 +338,7 @@ where
                 let result = {
                     let stream = StateStream {
                         stream: combine::easy::Stream(combine::stream::PartialStream(buffer)),
-                        state: &mut self.value_state
+                        state: &mut self.value_state as &mut RedisParser
                     };
                     combine::stream::decode(value(), stream, &mut self.state)
                 };
