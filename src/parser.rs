@@ -10,12 +10,13 @@ use tokio_io::AsyncRead;
 
 use combine;
 use combine::byte::{byte, crlf};
-use combine::combinator::{any_send_partial_state, AnySendPartialState};
+use combine::combinator::{any_send_partial_state, AnySendPartialState, parser as fn_parser};
 #[allow(unused_imports)] // See https://github.com/rust-lang/rust/issues/43970
-use combine::error::StreamError;
+use combine::error::{StreamError, Consumed};
 use combine::parser::choice::choice;
 use combine::range::{recognize, take, take_until_range};
 use combine::stream::{RangeStream, StreamErrorFor};
+use combine::stream::user_state::StateStream;
 
 struct ResultExtend<T, E>(Result<T, E>);
 
@@ -53,9 +54,109 @@ where
     }
 }
 
+trait RedisParser {
+    type BulkParser: RedisParser;
+    fn nil(&mut self) -> RedisResult<()>;
+    fn data(&mut self, data: &[u8]) -> RedisResult<()>;
+    fn status(&mut self, msg: & str) -> RedisResult<()>;
+    fn bulk_start(&mut self, size: usize);
+    fn bulk_end(&mut self);
+    fn int(&mut self, i: i64) -> RedisResult<()>;
+}
+
+enum ValueParser {
+    Bulk(Vec<Vec<Value>>),
+    Value(Value)
+}
+
+impl Default for ValueParser {
+     fn default() -> Self {
+         ValueParser::Value(Value::Nil)
+     }
+}
+
+impl ValueParser {
+    fn take(&mut self) -> Value {
+        let value = ::std::mem::replace(self, ValueParser::default());
+        match value {
+            ValueParser::Value(v) => v,
+            ValueParser::Bulk(_) => unreachable!(),
+        }
+    }
+
+    fn value(&mut self, value: Value) -> RedisResult<()> {
+        match self {
+            ValueParser::Value(_) => *self = ValueParser::Value(value),
+            ValueParser::Bulk(bulk) => bulk.last_mut().unwrap().push(value),
+        }
+        Ok(())
+    }
+}
+
+impl RedisParser for ValueParser {
+    type BulkParser = Self;
+    fn nil(&mut  self) -> RedisResult<()> {
+        self.value(Value::Nil)
+    }
+    fn data(&mut  self, data: &[u8]) -> RedisResult<()> {
+        self.value(Value::Data(data.to_owned()))
+    }
+    fn status(&mut  self, msg: &str) -> RedisResult<()> {
+        self.value(if msg == "OK" {
+            Value::Okay
+        } else {
+            Value::Status(msg.to_owned())
+        })
+    }
+    fn bulk_start(&mut self, size: usize) {
+        let bulks = match self {
+            ValueParser::Value(_) => {
+                *self = ValueParser::Bulk(vec![]);
+                match self {
+                    ValueParser::Value(_) => unreachable!(),
+                    ValueParser::Bulk(bulks) => bulks,
+                }
+            }
+            ValueParser::Bulk(bulks) => bulks,
+        };
+        bulks.push(Vec::with_capacity(size));
+    }
+    fn bulk_end(&mut self) {
+        *self = match self {
+            ValueParser::Value(_) => unreachable!(),
+            ValueParser::Bulk(bulks) => {
+                let done_bulk = bulks.pop().unwrap();
+                match bulks.last_mut() {
+                    Some(bulk) => {
+                        bulk.push(Value::Bulk(done_bulk));
+                        return;
+                    }
+                    None => ValueParser::Value(Value::Bulk(done_bulk)),
+                }
+            }
+        }
+    }
+    fn int(&mut  self, i: i64) -> RedisResult<()> {
+        self.value(Value::Int(i))
+    }
+}
+
+parser! {
+fn with_state[S, R, I, F](f: F)(StateStream<I, S>) -> R
+    where [
+        F: FnMut(&mut S) -> R,
+        I: combine::Stream
+    ]
+{
+    fn_parser(move |input: &mut StateStream<I, S>| -> Result<_, _> {
+        Ok((f(&mut input.state), Consumed::Empty(())))
+    })
+}
+}
+
 parser! {
     type PartialState = AnySendPartialState;
-    fn value['a, I]()(I) -> RedisResult<Value>
+    fn value['a, 'b, I]()(StateStream<I, &'b mut ValueParser>) -> RedisResult<()>
         where [I: RangeStream<Item = u8, Range = &'a [u8]> ]
     {
         let end_of_line: fn () -> _ = || crlf();
@@ -65,41 +166,45 @@ parser! {
                     .map_err(StreamErrorFor::<I>::other)
             });
 
-        let status = || line().map(|line| {
-            if line == "OK" {
-                Value::Okay
-            } else {
-                Value::Status(line.into())
-            }
+        let status = || line().map_input(move |line, input: &mut StateStream<_, &mut ValueParser>| {
+            input.state.status(line)
         });
 
-        let int = || line().and_then(|line| {
+        let int = || line().and_then(move |line| {
             match line.trim().parse::<i64>() {
                 Err(_) => Err(StreamErrorFor::<I>::message_static_message("Expected integer, got garbage")),
                 Ok(value) => Ok(value),
             }
         });
 
-        let data = || int().then_partial(move |size| {
-            if *size < 0 {
-                combine::value(Value::Nil).left()
+        let data = || int().then_partial(move |&mut size| {
+            if size < 0 {
+                with_state(move |state: &mut &mut ValueParser| state.nil())
+                    .left()
             } else {
-                take(*size as usize)
-                    .map(|bs: &[u8]| Value::Data(bs.to_vec()))
+                take(size as usize)
+                    .map_input(move |bs: &[u8], input: &mut StateStream<_, &mut ValueParser>| 
+                        input.state.data(bs)
+                    )
                     .skip(end_of_line())
                     .right()
             }
         });
 
         let bulk = || {
-            int().then_partial(|&mut length| {
+            int().then_partial(move |&mut length| {
                 if length < 0 {
-                    combine::value(Value::Nil).map(Ok).left()
+                    with_state(move |state: &mut &mut ValueParser| 
+                        state.nil()
+                    )
+                        .left()
                 } else {
                     let length = length as usize;
-                    combine::count_min_max(length, length, value())
-                        .map(|result: ResultExtend<_, _>| {
-                            result.0.map(Value::Bulk)
+                    with_state(move |state: &mut &mut ValueParser| state.bulk_start(length))
+                        .with(combine::count_min_max(length, length, value()))
+                        .skip(with_state(|state: &mut &mut ValueParser| state.bulk_end()))
+                        .map(|result: ResultExtend<(), _>| {
+                            result.0
                         })
                         .right()
                 }
@@ -108,7 +213,7 @@ parser! {
 
         let error = || {
             line()
-                .map(|line: &str| {
+                .map(move |line: &str| {
                     let desc = "An error was signalled by the server";
                     let mut pieces = line.splitn(2, ' ');
                     let kind = match pieces.next().unwrap() {
@@ -128,9 +233,14 @@ parser! {
         };
 
         any_send_partial_state(choice((
-           byte(b'+').with(status().map(Ok)),
-           byte(b':').with(int().map(Value::Int).map(Ok)),
-           byte(b'$').with(data().map(Ok)),
+           byte(b'+').with(status()),
+           byte(b':').with(int().then_partial(move |&mut i| {
+
+                with_state(move |state: &mut &mut ValueParser| 
+                    state.int(i)
+                )
+           })),
+           byte(b'$').with(data()),
            byte(b'*').with(bulk()),
            byte(b'-').with(error().map(Err))
         )))
@@ -140,6 +250,7 @@ parser! {
 #[derive(Default)]
 pub struct ValueCodec {
     state: AnySendPartialState,
+    value_state: ValueParser,
 }
 
 impl Encoder for ValueCodec {
@@ -157,9 +268,18 @@ impl Decoder for ValueCodec {
     fn decode(&mut self, bytes: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         let (opt, removed_len) = {
             let buffer = &bytes[..];
-            let stream = combine::easy::Stream(combine::stream::PartialStream(buffer));
-            match combine::stream::decode(value(), stream, &mut self.state) {
-                Ok(x) => x,
+            let result = {
+                let stream = StateStream {
+                    stream: combine::easy::Stream(combine::stream::PartialStream(buffer)),
+                    state: &mut self.value_state
+                };
+                combine::stream::decode(value(), stream, &mut self.state)
+            };
+            match result {
+                Ok((opt, removed)) => {
+                    let value_state = &mut self.value_state;
+                    (opt.map(|result| result.map(|()| value_state.take())), removed)
+                }
                 Err(err) => {
                     let err = err
                         .map_position(|pos| pos.translate_position(buffer))
@@ -185,6 +305,7 @@ impl Decoder for ValueCodec {
 pub struct ValueFuture<R> {
     reader: Option<R>,
     state: AnySendPartialState,
+    value_state: ValueParser,
     // Intermediate storage for data we know that we need to parse a value but we haven't been able
     // to parse completely yet
     remaining: Vec<u8>,
@@ -216,9 +337,18 @@ where
                 } else {
                     buffer
                 };
-                let stream = combine::easy::Stream(combine::stream::PartialStream(buffer));
-                match combine::stream::decode(value(), stream, &mut self.state) {
-                    Ok(x) => x,
+                let result = {
+                    let stream = StateStream {
+                        stream: combine::easy::Stream(combine::stream::PartialStream(buffer)),
+                        state: &mut self.value_state
+                    };
+                    combine::stream::decode(value(), stream, &mut self.state)
+                };
+                match result {
+                    Ok((opt, removed)) => {
+                        let value_state = &mut self.value_state;
+                        (opt.map(|result| result.map(|()| value_state.take())), removed)
+                    }
                     Err(err) => {
                         let err = err
                             .map_position(|pos| pos.translate_position(buffer))
@@ -275,6 +405,7 @@ where
     ValueFuture {
         reader: Some(reader),
         state: Default::default(),
+        value_state: ValueParser::default(),
         remaining: Vec::new(),
     }
 }
@@ -303,6 +434,7 @@ impl<'a, T: BufRead> Parser<T> {
         let mut parser = ValueFuture {
             reader: Some(&mut self.reader),
             state: Default::default(),
+            value_state: ValueParser::default(),
             remaining: Vec::new(),
         };
         match parser.poll()? {
