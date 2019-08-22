@@ -71,8 +71,9 @@ impl Client {
             }
         }
 
-        self.get_async_connection()
-            .and_then(move |con| crate::aio::SharedConnection::new(con, TokioExecutor))
+        self.get_async_connection().and_then(move |con| {
+            future::ready(crate::aio::SharedConnection::new(con, TokioExecutor))
+        })
     }
 
     /// Returns a async shared connection with a specific executor.
@@ -84,7 +85,7 @@ impl Client {
         E: task::Spawn,
     {
         self.get_async_connection()
-            .and_then(move |con| crate::aio::SharedConnection::new(con, executor))
+            .and_then(move |con| future::ready(crate::aio::SharedConnection::new(con, executor)))
     }
 }
 
