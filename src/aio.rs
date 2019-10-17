@@ -11,7 +11,9 @@ use tokio::net::unix::UnixStream;
 use tokio::codec::Decoder;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::tcp::TcpStream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
+
+use futures_channel::oneshot;
 
 use futures::{
     prelude::*,
@@ -272,11 +274,20 @@ struct PipelineMessage<S, I, E> {
 /// items being output by the `Stream` (the number is specified at time of sending). With the
 /// interface provided by `Pipeline` an easy interface of request to response, hiding the `Stream`
 /// and `Sink`.
-struct Pipeline<SinkItem, I, E>(mpsc::Sender<PipelineMessage<SinkItem, I, E>>);
+struct Pipeline<SinkItem, I, E> {
+    message_channel: mpsc::Sender<PipelineMessage<SinkItem, I, E>>,
+    response_receiver: oneshot::Receiver<Result<Vec<I>, E>>,
+    response_sender: Option<oneshot::Sender<Result<Vec<I>, E>>>,
+}
 
 impl<SinkItem, I, E> Clone for Pipeline<SinkItem, I, E> {
     fn clone(&self) -> Self {
-        Pipeline(self.0.clone())
+        let (tx, rx) = oneshot::channel();
+        Pipeline {
+            message_channel: self.message_channel.clone(),
+            response_sender: Some(tx),
+            response_receiver: rx,
+        }
     }
 }
 
@@ -451,7 +462,12 @@ where
             .forward(PipelineSink::new::<SinkItem>(sink_stream))
             .map(|_| ());
         executor.spawn(f).expect("Unable to spawn redis task");
-        Pipeline(sender)
+        let (tx, rx) = oneshot::channel();
+        Pipeline {
+            message_channel: sender,
+            response_receiver: rx,
+            response_sender: Some(tx),
+        }
     }
 
     // `None` means that the stream was out of items causing that poll loop to shut down.
@@ -466,28 +482,25 @@ where
         input: SinkItem,
         count: usize,
     ) -> Result<Vec<I>, Option<E>> {
-        let (sender, receiver) = oneshot::channel();
-
-        self.0
+        self.message_channel
             .send(PipelineMessage {
                 input,
                 response_count: count,
-                output: sender,
+                output: self.response_sender.take().unwrap(),
             })
             .map_err(|_| None)
-            .and_then(|_| {
-                receiver.then(|result| {
-                    future::ready(match result {
-                        Ok(result) => result.map_err(Some),
-                        Err(_) => {
-                            // The `sender` was dropped which likely means that the stream part
-                            // failed for one reason or another
-                            Err(None)
-                        }
-                    })
-                })
-            })
-            .await
+            .await?;
+
+        let result = (&mut self.response_receiver).await;
+        self.response_sender = Some(self.response_receiver.reset());
+        match result {
+            Ok(result) => result.map_err(Some),
+            Err(_) => {
+                // The `sender` was dropped which likely means that the stream part
+                // failed for one reason or another
+                Err(None)
+            }
+        }
     }
 }
 
