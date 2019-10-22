@@ -340,7 +340,7 @@
 //! heavily encouraged to use the URL based configuration format which
 //! is a lot more stable than the structs.
 
-#![feature(async_await)]
+// #![feature(async_await)]
 #![deny(non_camel_case_types)]
 
 #[macro_use]
