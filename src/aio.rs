@@ -199,7 +199,7 @@ pub fn connect(connection_info: ConnectionInfo) -> impl Future<Output = RedisRes
             };
 
             Either::Left(
-                TcpStream::connect(&socket_addr)
+                TcpStream::connect(socket_addr)
                     .err_into()
                     .map_ok(|con| ActualConnection::Tcp(WriteWrapper(BufReader::new(con)))),
             )
